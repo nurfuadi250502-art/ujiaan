@@ -6,6 +6,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: '/ujiaan/',
     plugins: [
       react(),
       tailwindcss(),
