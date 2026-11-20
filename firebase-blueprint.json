@@ -1,0 +1,276 @@
+{
+  "entities": {
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Default school identity, formatting preferences, and website settings owned by a user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "schoolName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "schoolAddress": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "examType": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "academicYear": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "semester": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "defaultDuration": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "teacherName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "paperSize": {
+          "type": "string",
+          "enum": ["A4", "F4", "Letter"]
+        },
+        "fontFamily": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "fontSize": {
+          "type": "number"
+        },
+        "preserveContentStrict": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "schoolName", "paperSize", "updatedAt"]
+    },
+    "SubjectConfig": {
+      "title": "SubjectConfig",
+      "description": "Subject mapping configuration including formal document title and assigned template.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "shortName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "formalName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "defaultTemplateId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "defaultDuration": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "defaultInstructions": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "isCustom": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "code", "shortName", "formalName", "isCustom", "updatedAt"]
+    },
+    "TemplateDocument": {
+      "title": "TemplateDocument",
+      "description": "Uploaded or built-in exam document template with placeholder mappings.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "sourceType": {
+          "type": "string",
+          "enum": ["builtin", "docx", "doc", "pdf"]
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["ltr", "rtl"]
+        },
+        "paperSize": {
+          "type": "string",
+          "enum": ["A4", "F4", "Letter"]
+        },
+        "headerTitle": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "headerSubtitle": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "placeholdersDetected": {
+          "type": "array"
+        },
+        "placeholderMappings": {
+          "type": "object"
+        },
+        "docxBase64": {
+          "type": "string",
+          "maxLength": 800000
+        },
+        "storageUrl": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "extractedPreviewText": {
+          "type": "string",
+          "maxLength": 50000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "name", "sourceType", "paperSize", "createdAt", "updatedAt"]
+    },
+    "ExamDocument": {
+      "title": "ExamDocument",
+      "description": "Saved exam document containing raw questions, parsed structure, identity metadata, and formatting config.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "subjectCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "subjectFormalName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "className": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "questionCount": {
+          "type": "number"
+        },
+        "templateId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "templateName": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "ready", "exported"]
+        },
+        "rawText": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "identity": {
+          "type": "object"
+        },
+        "formatConfig": {
+          "type": "object"
+        },
+        "parsedQuestions": {
+          "type": "array"
+        },
+        "warnings": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "title", "subjectCode", "subjectFormalName", "questionCount", "status", "rawText", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserSettings"
+      },
+      "description": "Per-user default school identity and editor preferences."
+    },
+    "/users/{userId}/subjects/{subjectId}": {
+      "schema": {
+        "$ref": "#/entities/SubjectConfig"
+      },
+      "description": "Subject definitions and template bindings owned by the user."
+    },
+    "/users/{userId}/templates/{templateId}": {
+      "schema": {
+        "$ref": "#/entities/TemplateDocument"
+      },
+      "description": "Exam document templates and placeholder mappings owned by the user."
+    },
+    "/users/{userId}/documents/{documentId}": {
+      "schema": {
+        "$ref": "#/entities/ExamDocument"
+      },
+      "description": "Saved exam documents and version history owned by the user."
+    }
+  }
+}

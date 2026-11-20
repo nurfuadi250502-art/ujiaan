@@ -1,0 +1,228 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isSignedIn()
+        && request.auth.uid == userId
+        && request.auth.token.email_verified == true;
+    }
+
+    // Entity Validators
+    function isValidUserSettings(data, userId) {
+      return data.keys().hasAll(['ownerId', 'schoolName', 'paperSize', 'updatedAt'])
+        && data.keys().hasOnly([
+          'ownerId', 'schoolName', 'schoolAddress', 'examType',
+          'academicYear', 'semester', 'defaultDuration', 'teacherName',
+          'paperSize', 'fontFamily', 'fontSize', 'preserveContentStrict',
+          'logoDataUrl', 'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.schoolName is string && data.schoolName.size() <= 200
+        && (!('schoolAddress' in data) || (data.schoolAddress is string && data.schoolAddress.size() <= 300))
+        && (!('examType' in data) || (data.examType is string && data.examType.size() <= 120))
+        && (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() <= 40))
+        && (!('semester' in data) || (data.semester is string && data.semester.size() <= 40))
+        && (!('defaultDuration' in data) || (data.defaultDuration is string && data.defaultDuration.size() <= 60))
+        && (!('teacherName' in data) || (data.teacherName is string && data.teacherName.size() <= 120))
+        && data.paperSize is string && data.paperSize in ['A4', 'F4', 'Letter']
+        && (!('fontFamily' in data) || (data.fontFamily is string && data.fontFamily.size() <= 80))
+        && (!('fontSize' in data) || (data.fontSize is number && data.fontSize >= 8 && data.fontSize <= 24))
+        && (!('preserveContentStrict' in data) || data.preserveContentStrict is bool)
+        && (!('logoDataUrl' in data) || (data.logoDataUrl is string && data.logoDataUrl.size() <= 350000))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSubjectConfig(data, userId) {
+      return data.keys().hasAll(['ownerId', 'code', 'shortName', 'formalName', 'isCustom', 'updatedAt'])
+        && data.keys().hasOnly([
+          'ownerId', 'code', 'shortName', 'formalName',
+          'defaultTemplateId', 'defaultDuration', 'defaultInstructions',
+          'isCustom', 'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.code is string && data.code.size() >= 1 && data.code.size() <= 80
+        && data.shortName is string && data.shortName.size() >= 1 && data.shortName.size() <= 100
+        && data.formalName is string && data.formalName.size() >= 1 && data.formalName.size() <= 160
+        && (!('defaultTemplateId' in data) || (data.defaultTemplateId is string && data.defaultTemplateId.size() <= 128))
+        && (!('defaultDuration' in data) || (data.defaultDuration is string && data.defaultDuration.size() <= 60))
+        && (!('defaultInstructions' in data) || (data.defaultInstructions is string && data.defaultInstructions.size() <= 2000))
+        && data.isCustom is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTemplateDoc(data, userId) {
+      return data.keys().hasAll(['ownerId', 'name', 'sourceType', 'paperSize', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'ownerId', 'name', 'sourceType', 'direction', 'paperSize',
+          'headerTitle', 'headerSubtitle', 'kopLines',
+          'placeholdersDetected', 'placeholderMappings',
+          'docxBase64', 'storageUrl', 'extractedPreviewText',
+          'logoDataUrl', 'margins', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
+        && data.sourceType is string && data.sourceType in ['builtin', 'docx', 'doc', 'pdf']
+        && (!('direction' in data) || (data.direction is string && data.direction in ['ltr', 'rtl']))
+        && data.paperSize is string && data.paperSize in ['A4', 'F4', 'Letter']
+        && (!('headerTitle' in data) || (data.headerTitle is string && data.headerTitle.size() <= 240))
+        && (!('headerSubtitle' in data) || (data.headerSubtitle is string && data.headerSubtitle.size() <= 300))
+        && (!('kopLines' in data) || (data.kopLines is list && data.kopLines.size() <= 10 && (data.kopLines.size() == 0 || data.kopLines[0] is string)))
+        && (!('placeholdersDetected' in data) || (data.placeholdersDetected is list && data.placeholdersDetected.size() <= 50 && (data.placeholdersDetected.size() == 0 || data.placeholdersDetected[0] is string)))
+        && (!('placeholderMappings' in data) || data.placeholderMappings is map)
+        && (!('docxBase64' in data) || (data.docxBase64 is string && data.docxBase64.size() <= 800000))
+        && (!('storageUrl' in data) || (data.storageUrl is string && data.storageUrl.size() <= 1000))
+        && (!('extractedPreviewText' in data) || (data.extractedPreviewText is string && data.extractedPreviewText.size() <= 50000))
+        && (!('logoDataUrl' in data) || (data.logoDataUrl is string && data.logoDataUrl.size() <= 350000))
+        && (!('margins' in data) || data.margins is map)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidExamDocument(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'title', 'subjectCode', 'subjectFormalName',
+          'questionCount', 'status', 'rawText', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'title', 'subjectCode', 'subjectFormalName',
+          'className', 'questionCount', 'templateId', 'templateName',
+          'status', 'rawText', 'identity', 'formatConfig',
+          'parsedQuestions', 'warnings', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.subjectCode is string && data.subjectCode.size() >= 1 && data.subjectCode.size() <= 80
+        && data.subjectFormalName is string && data.subjectFormalName.size() >= 1 && data.subjectFormalName.size() <= 160
+        && (!('className' in data) || (data.className is string && data.className.size() <= 80))
+        && data.questionCount is number && data.questionCount >= 0 && data.questionCount <= 1000
+        && (!('templateId' in data) || (data.templateId is string && data.templateId.size() <= 128))
+        && (!('templateName' in data) || (data.templateName is string && data.templateName.size() <= 160))
+        && data.status is string && data.status in ['draft', 'ready', 'exported']
+        && data.rawText is string && data.rawText.size() <= 200000
+        && (!('identity' in data) || data.identity is map)
+        && (!('formatConfig' in data) || data.formatConfig is map)
+        && (!('parsedQuestions' in data) || (data.parsedQuestions is list && data.parsedQuestions.size() <= 500 && (data.parsedQuestions.size() == 0 || data.parsedQuestions[0] is map)))
+        && (!('warnings' in data) || (data.warnings is list && data.warnings.size() <= 200 && (data.warnings.size() == 0 || data.warnings[0] is map)))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // User Settings
+    match /users/{userId} {
+      allow get: if isVerifiedOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserSettings(incoming(), userId)
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserSettings(incoming(), userId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'schoolName', 'schoolAddress', 'examType', 'academicYear',
+          'semester', 'defaultDuration', 'teacherName', 'paperSize',
+          'fontFamily', 'fontSize', 'preserveContentStrict', 'logoDataUrl', 'updatedAt'
+        ]);
+      allow delete: if isVerifiedOwner(userId) && isValidId(userId);
+
+      // User Subjects
+      match /subjects/{subjectId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(subjectId);
+        allow list: if isVerifiedOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(subjectId)
+          && isValidSubjectConfig(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(subjectId)
+          && isValidSubjectConfig(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'code', 'shortName', 'formalName', 'defaultTemplateId',
+            'defaultDuration', 'defaultInstructions', 'isCustom', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(subjectId);
+      }
+
+      // User Templates
+      match /templates/{templateId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(templateId);
+        allow list: if isVerifiedOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(templateId)
+          && isValidTemplateDoc(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(templateId)
+          && isValidTemplateDoc(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'sourceType', 'direction', 'paperSize', 'headerTitle', 'headerSubtitle',
+            'kopLines', 'placeholdersDetected', 'placeholderMappings',
+            'docxBase64', 'storageUrl', 'extractedPreviewText',
+            'logoDataUrl', 'margins', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(templateId);
+      }
+
+      // User Exam Documents & History
+      match /documents/{documentId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(documentId);
+        allow list: if isVerifiedOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(documentId)
+          && isValidExamDocument(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(documentId)
+          && isValidExamDocument(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'subjectCode', 'subjectFormalName', 'className',
+            'questionCount', 'templateId', 'templateName', 'status',
+            'rawText', 'identity', 'formatConfig', 'parsedQuestions',
+            'warnings', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(documentId);
+      }
+    }
+  }
+}
