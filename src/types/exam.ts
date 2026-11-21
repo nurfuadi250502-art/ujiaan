@@ -282,3 +282,43 @@ export interface AccuracyReport {
   diffRows: DiffRow[];
   manualReviewCount: number;
 }
+
+export type UserRole = 'admin' | 'guru';
+
+export interface UserProfile {
+  ownerId: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  subjectSpecialty?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SharedExamDocument extends ExamDocument {
+  ownerId: string;
+  sourceDocId: string;
+  teacherEmail: string;
+  teacherName: string;
+}
+
+export interface StudentScoreEntry {
+  id: string;
+  ownerId: string;
+  teacherEmail: string;
+  teacherName: string;
+  documentId?: string;
+  examTitle: string;
+  subjectName: string;
+  className: string;
+  semester?: string;
+  academicYear?: string;
+  studentName: string;
+  studentNis?: string;
+  score: number;
+  predicate: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+

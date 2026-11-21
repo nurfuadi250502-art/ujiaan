@@ -13,9 +13,27 @@ import {
   FilePlus2,
   CheckCircle2,
   AlertCircle,
+  FileSpreadsheet,
+  ShieldCheck,
+  Home,
 } from 'lucide-react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
-import { auth, googleProvider } from './lib/firebase';
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  reload,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+  type User,
+} from 'firebase/auth';
+import {
+  auth,
+  connectGoogleDriveAccess,
+  signInWithGoogleAndCaptureDriveToken,
+  subscribeDriveToken,
+} from './lib/firebase';
 import {
   ALLOWED_BUILTIN_TEMPLATE_IDS,
   ARABIC_KMI_IDENTITY_DEFAULTS,
@@ -34,8 +52,12 @@ import type {
   FormatConfig,
   ParsedQuestion,
   ParserWarning,
+  SharedExamDocument,
+  StudentScoreEntry,
   SubjectConfig,
   TemplateDocument,
+  UserProfile,
+  UserRole,
   UserSettings,
 } from './types/exam';
 import {
@@ -47,20 +69,30 @@ import { stripRichHtml } from './utils/richText';
 import { exportDocumentToDocx } from './utils/docxEngine';
 import { exportDocumentToPdf } from './utils/pdfExporter';
 import {
+  ensureUserProfile,
+  isPrimaryAdminEmail,
   loadLocalDocuments,
+  loadLocalScores,
   loadLocalSettings,
   loadLocalSubjects,
   loadLocalTemplates,
+  PRIMARY_ADMIN_EMAIL,
   saveLocalDocuments,
+  saveLocalScores,
   saveLocalSettings,
   saveLocalSubjects,
   saveLocalTemplates,
+  subscribeSharedDocuments,
+  subscribeStudentScores,
+  subscribeUserProfiles,
   syncDeleteDocumentFromCloud,
+  syncDeleteStudentScore,
   syncDeleteSubjectFromCloud,
   syncDeleteTemplateFromCloud,
   syncLoadAllFromCloud,
   syncSaveDocumentToCloud,
   syncSaveSettingsToCloud,
+  syncSaveStudentScore,
   syncSaveSubjectToCloud,
   syncSaveTemplateToCloud,
 } from './services/storageService';
@@ -71,8 +103,38 @@ import { TemplateManagerView } from './components/TemplateManagerView';
 import { SubjectSettingsView } from './components/SubjectSettingsView';
 import { HistoryView } from './components/HistoryView';
 import { WebsiteSettingsView } from './components/WebsiteSettingsView';
+import { LandingAuthPortal } from './components/LandingAuthPortal';
+import { GradesRecapView } from './components/GradesRecapView';
+import { AdminMonitorView } from './components/AdminMonitorView';
+import {
+  DriveActionConfirmModal,
+  GoogleDriveSyncPanel,
+  type PendingDriveConfirmation,
+} from './components/GoogleDriveSyncPanel';
+import {
+  buildExamDocxDrivePayload,
+  buildMetadataBackupPayloads,
+  buildScoreDatasetPayloads,
+  createDriveFile,
+  deleteDriveFile,
+  listAppDriveFiles,
+  prepareDriveSyncPlan,
+  updateDriveFile,
+  withTimestampSuffix,
+  type DriveFileItem,
+  type DriveFolderInfo,
+  type DriveUploadPayload,
+} from './services/googleDriveService';
 
-type NavTab = 'dashboard' | 'editor' | 'templates' | 'subjects' | 'history' | 'settings';
+type NavTab =
+  | 'dashboard'
+  | 'editor'
+  | 'grades'
+  | 'admin'
+  | 'templates'
+  | 'subjects'
+  | 'history'
+  | 'settings';
 
 interface EditorSnapshot {
   identity: ExamIdentity;
@@ -80,14 +142,45 @@ interface EditorSnapshot {
   parsedQuestions: ParsedQuestion[];
 }
 
-const NAV_ITEMS: { id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+const BASE_NAV_ITEMS: { id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'editor', label: 'Input Soal', icon: FileEdit },
+  { id: 'grades', label: 'Input & Rekap Nilai', icon: FileSpreadsheet },
   { id: 'templates', label: 'Template Dokumen', icon: FolderKanban },
   { id: 'subjects', label: 'Pengaturan Mata Pelajaran', icon: BookOpen },
   { id: 'history', label: 'Riwayat Dokumen', icon: History },
   { id: 'settings', label: 'Pengaturan Website', icon: Settings },
 ];
+
+const ADMIN_NAV_ITEM: { id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> } = {
+  id: 'admin',
+  label: 'Pusat Data Admin',
+  icon: ShieldCheck,
+};
+
+function mapFirebaseAuthError(err: unknown): string {
+  const code = (err as { code?: string })?.code || '';
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Email atau kata sandi tidak cocok. Silakan periksa kembali.';
+    case 'auth/email-already-in-use':
+      return 'Email ini sudah terdaftar. Silakan masuk atau reset kata sandi.';
+    case 'auth/weak-password':
+      return 'Kata sandi minimal 6 karakter.';
+    case 'auth/invalid-email':
+      return 'Format alamat email tidak valid.';
+    case 'auth/operation-not-allowed':
+      return 'Login Email & Kata Sandi belum diaktifkan di Firebase Console (Authentication -> Sign-in method -> Email/Password). Silakan aktifkan terlebih dahulu atau gunakan tombol Masuk Email Google.';
+    case 'auth/popup-closed-by-user':
+      return 'Jendela login Google ditutup sebelum selesai.';
+    case 'auth/too-many-requests':
+      return 'Terlalu banyak percobaan. Silakan tunggu beberapa saat lalu coba lagi.';
+    default:
+      return err instanceof Error ? err.message : 'Terjadi kesalahan saat proses autentikasi.';
+  }
+}
 
 function sanitizeDocFilenamePart(raw: string, fallback: string): string {
   const cleaned = stripRichHtml(raw || '')
@@ -101,14 +194,41 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('editor');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  // Auth & Cloud State
+  // Auth, Role & Portal State
+  const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [selectedPortalRole, setSelectedPortalRole] = useState<UserRole>('guru');
+  const selectedPortalRoleRef = useRef<UserRole>(selectedPortalRole);
+  selectedPortalRoleRef.current = selectedPortalRole;
+  const [showLandingPortal, setShowLandingPortal] = useState<boolean>(true);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const pendingProfileMetaRef = useRef<{
+    role: UserRole;
+    displayName?: string;
+    subjectSpecialty?: string;
+    enforceAdminCheck?: boolean;
+  } | null>(null);
 
   // Persistent Collections (Default subjects empty so teacher enters subject directly; strictly 2 KMI templates)
   const [settings, setSettings] = useState<UserSettings>(() => loadLocalSettings());
   const [subjects, setSubjects] = useState<SubjectConfig[]>(() => loadLocalSubjects());
   const [templates, setTemplates] = useState<TemplateDocument[]>(DEFAULT_TEMPLATES);
   const [documents, setDocuments] = useState<ExamDocument[]>(() => loadLocalDocuments());
+  const [sharedDocuments, setSharedDocuments] = useState<SharedExamDocument[]>([]);
+  const [studentScores, setStudentScores] = useState<StudentScoreEntry[]>(() => loadLocalScores());
+  const [allUserProfiles, setAllUserProfiles] = useState<UserProfile[]>([]);
+  const [autoSyncLabel, setAutoSyncLabel] = useState<string | null>(null);
+
+  // Google Drive In-Memory OAuth & Folder State
+  const [driveToken, setDriveToken] = useState<string | null>(null);
+  const [driveFolder, setDriveFolder] = useState<DriveFolderInfo | null>(null);
+  const [driveFiles, setDriveFiles] = useState<DriveFileItem[]>([]);
+  const [isDriveSyncing, setIsDriveSyncing] = useState(false);
+  const [pendingDriveConfirm, setPendingDriveConfirm] =
+    useState<PendingDriveConfirmation | null>(null);
 
   // Active Document Workbench State
   const [currentDocId, setCurrentDocId] = useState<string>(() => `doc_${Date.now()}`);
@@ -238,12 +358,54 @@ export default function App() {
     });
   }, []);
 
-  // Listen to Firebase Auth & sync from Cloud Firestore when signed in
+  // Listen to Firebase Auth, ensure user profile, & sync from Cloud Firestore when signed in
   useEffect(() => {
+    let unsubShared: (() => void) | undefined;
+    let unsubScores: (() => void) | undefined;
+    let unsubProfiles: (() => void) | undefined;
+
     const unsub = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
+
+      // Tear down old listeners
+      if (unsubShared) {
+        unsubShared();
+        unsubShared = undefined;
+      }
+      if (unsubScores) {
+        unsubScores();
+        unsubScores = undefined;
+      }
+      if (unsubProfiles) {
+        unsubProfiles();
+        unsubProfiles = undefined;
+      }
+
       if (currentUser && currentUser.emailVerified) {
         try {
+          const pendingMeta = pendingProfileMetaRef.current;
+          pendingProfileMetaRef.current = null;
+          const desiredRole = pendingMeta?.role || selectedPortalRoleRef.current;
+          const profile = await ensureUserProfile(
+            desiredRole,
+            pendingMeta?.displayName,
+            pendingMeta?.subjectSpecialty
+          );
+          setUserProfile(profile);
+
+          if (pendingMeta?.enforceAdminCheck && profile?.role !== 'admin') {
+            setAuthError(
+              `Email ${currentUser.email} terdaftar sebagai Ustadz/Guru, bukan Admin sistem (${PRIMARY_ADMIN_EMAIL}). Anda dapat masuk sebagai Ustadz/Guru atau keluar untuk mengganti email.`
+            );
+            setShowLandingPortal(true);
+          } else {
+            setAuthError(null);
+            setShowLandingPortal(false);
+            if (profile?.role === 'admin') {
+              setActiveTab((prev) => (prev === 'editor' ? 'admin' : prev));
+            }
+          }
+
           const cloudData = await syncLoadAllFromCloud();
           if (cloudData) {
             if (cloudData.settings) {
@@ -275,12 +437,52 @@ export default function App() {
               saveLocalDocuments(cloudData.documents);
             }
           }
+
+          const canListAllAsAdmin =
+            profile?.role === 'admin' && isPrimaryAdminEmail(currentUser.email);
+
+          unsubShared = subscribeSharedDocuments(
+            currentUser.uid,
+            canListAllAsAdmin,
+            (sharedList) => {
+              setSharedDocuments(sharedList);
+            }
+          );
+
+          unsubScores = subscribeStudentScores(
+            currentUser.uid,
+            canListAllAsAdmin,
+            (scoreList) => {
+              setStudentScores(scoreList);
+              saveLocalScores(scoreList);
+            }
+          );
+
+          if (canListAllAsAdmin) {
+            unsubProfiles = subscribeUserProfiles((profilesList) => {
+              setAllUserProfiles(profilesList);
+            });
+          } else if (profile) {
+            setAllUserProfiles([profile]);
+          }
         } catch (err) {
           console.error('Cloud sync failed:', err);
         }
+      } else {
+        setUserProfile(null);
+        setSharedDocuments([]);
+        setAllUserProfiles([]);
+        setShowLandingPortal(true);
       }
+      setAuthReady(true);
     });
-    return () => unsub();
+
+    return () => {
+      unsub();
+      if (unsubShared) unsubShared();
+      if (unsubScores) unsubScores();
+      if (unsubProfiles) unsubProfiles();
+    };
   }, []);
 
   const activeSubject = useMemo(
@@ -627,43 +829,118 @@ export default function App() {
     showToast('Input soal dikosongkan');
   };
 
-  const saveDocumentRecord = async (status: ExamDocument['status']) => {
-    const now = new Date().toISOString();
-    const existing = documents.find((d) => d.id === currentDocId);
-    const cleanSubjectFormal = stripRichHtml(identity.subjectFormalName || '').trim();
-    const cleanSubjectCode = stripRichHtml(identity.subjectCode || '').trim();
-    const cleanClass = stripRichHtml(identity.className || '').trim();
+  const teacherAttrInfo = useMemo(
+    () => ({
+      displayName:
+        userProfile?.displayName ||
+        user?.displayName ||
+        stripRichHtml(identity.teacherName || '') ||
+        user?.email?.split('@')[0] ||
+        'Ustadz / Guru',
+      email: user?.email || '',
+    }),
+    [userProfile, user, identity.teacherName]
+  );
 
-    // Top-level subjectCode & subjectFormalName satisfy firestore.rules size >= 1 while keeping identity.subjectFormalName untouched
-    const docRecord: ExamDocument = {
-      id: currentDocId,
-      title: documentTitle.trim() || `Naskah ${cleanSubjectFormal || 'Ujian'}`,
-      subjectCode: cleanSubjectCode || cleanSubjectFormal.slice(0, 40) || '-',
-      subjectFormalName: cleanSubjectFormal || '-',
-      className: cleanClass || '-',
-      questionCount: parsedQuestions.length,
-      templateId: activeTemplate.id,
-      templateName: activeTemplate.name,
-      status,
-      rawText,
-      identity: { ...identity, questionCount: parsedQuestions.length },
-      formatConfig,
+  const saveDocumentRecord = useCallback(
+    async (status: ExamDocument['status'], silent = false) => {
+      const now = new Date().toISOString();
+      const existing = documents.find((d) => d.id === currentDocId);
+      const cleanSubjectFormal = stripRichHtml(identity.subjectFormalName || '').trim();
+      const cleanSubjectCode = stripRichHtml(identity.subjectCode || '').trim();
+      const cleanClass = stripRichHtml(identity.className || '').trim();
+
+      // Top-level subjectCode & subjectFormalName satisfy firestore.rules size >= 1 while keeping identity.subjectFormalName untouched
+      const docRecord: ExamDocument = {
+        id: currentDocId,
+        title: documentTitle.trim() || `Naskah ${cleanSubjectFormal || 'Ujian'}`,
+        subjectCode: cleanSubjectCode || cleanSubjectFormal.slice(0, 40) || '-',
+        subjectFormalName: cleanSubjectFormal || '-',
+        className: cleanClass || '-',
+        questionCount: parsedQuestions.length,
+        templateId: activeTemplate.id,
+        templateName: activeTemplate.name,
+        status,
+        rawText,
+        identity: { ...identity, questionCount: parsedQuestions.length },
+        formatConfig,
+        parsedQuestions,
+        warnings,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+      };
+
+      setDocuments((prevDocs) => {
+        const nextDocs = [docRecord, ...prevDocs.filter((d) => d.id !== docRecord.id)];
+        saveLocalDocuments(nextDocs);
+        return nextDocs;
+      });
+      await syncSaveDocumentToCloud(docRecord, teacherAttrInfo).catch((e) => {
+        if (!silent) console.error(e);
+      });
+      setAutoSyncLabel('Tersimpan otomatis ke Guru & Admin');
+      return docRecord;
+    },
+    [
+      documents,
+      currentDocId,
+      identity,
+      documentTitle,
       parsedQuestions,
+      activeTemplate,
+      rawText,
+      formatConfig,
       warnings,
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-    };
+      teacherAttrInfo,
+    ]
+  );
 
-    const nextDocs = [docRecord, ...documents.filter((d) => d.id !== docRecord.id)];
-    setDocuments(nextDocs);
-    saveLocalDocuments(nextDocs);
-    await syncSaveDocumentToCloud(docRecord).catch((e) => console.error(e));
-    return docRecord;
-  };
+  // Automatic debounced sync of teacher exam input to both Guru & Admin collections
+  const autoSaveSignature = useMemo(
+    () =>
+      JSON.stringify({
+        currentDocId,
+        documentTitle,
+        rawText,
+        identity,
+        formatConfig,
+        qCount: parsedQuestions.length,
+      }),
+    [currentDocId, documentTitle, rawText, identity, formatConfig, parsedQuestions.length]
+  );
+
+  const initialMountRef = useRef(true);
+  useEffect(() => {
+    if (initialMountRef.current) {
+      initialMountRef.current = false;
+      return;
+    }
+    if (!user || !user.emailVerified || showLandingPortal) return;
+    if (parsedQuestions.length === 0 && rawText.trim().length < 5) return;
+
+    setAutoSyncLabel('Menyinkronkan...');
+    const timer = setTimeout(() => {
+      saveDocumentRecord('draft', true).catch((e) => console.error(e));
+    }, 2500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSaveSignature, user?.uid, user?.emailVerified, showLandingPortal]);
 
   const handleSaveDraft = async () => {
-    await saveDocumentRecord('draft');
-    showToast('Draft dokumen berhasil disimpan');
+    const savedDoc = await saveDocumentRecord('draft');
+    showToast('Draft dokumen tersimpan otomatis di sistem Guru & Admin');
+    if (driveToken && savedDoc.parsedQuestions.length > 0) {
+      const tpl =
+        templates.find((t) => t.id === savedDoc.templateId) || activeTemplate;
+      const docxPayload = await buildExamDocxDrivePayload({
+        examDoc: savedDoc,
+        template: tpl,
+        logoDataUrl: settings.logoDataUrl,
+      }).catch(() => null);
+      if (docxPayload) {
+        await syncPayloadsToDriveSafe([docxPayload], true);
+      }
+    }
   };
 
   const handleDuplicateCurrentDocument = async () => {
@@ -697,7 +974,7 @@ export default function App() {
     saveLocalDocuments(nextDocs);
     setCurrentDocId(newId);
     setDocumentTitle(copyTitle);
-    await syncSaveDocumentToCloud(dup).catch((e) => console.error(e));
+    await syncSaveDocumentToCloud(dup, teacherAttrInfo).catch((e) => console.error(e));
     showToast('Dokumen berhasil diduplikasi');
   };
 
@@ -723,8 +1000,22 @@ export default function App() {
       a.download = `Soal_${safeSub}_${safeCls}.docx`;
       a.click();
       URL.revokeObjectURL(url);
-      await saveDocumentRecord('exported');
+      const savedDoc = await saveDocumentRecord('exported');
       showToast('File Word (.docx) berhasil dibuat dan diunduh');
+      if (driveToken) {
+        await syncPayloadsToDriveSafe(
+          [
+            {
+              fileName: `Naskah_${safeSub}_${safeCls}_${savedDoc.id.replace(/^doc_/, '').slice(-6)}.docx`,
+              mimeType:
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              blob,
+              description: `Naskah soal ${stripRichHtml(savedDoc.title)}`,
+            },
+          ],
+          true
+        );
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Gagal mengekspor DOCX', 'error');
     } finally {
@@ -799,7 +1090,7 @@ export default function App() {
     const nextDocs = [dup, ...documents];
     setDocuments(nextDocs);
     saveLocalDocuments(nextDocs);
-    await syncSaveDocumentToCloud(dup).catch((e) => console.error(e));
+    await syncSaveDocumentToCloud(dup, teacherAttrInfo).catch((e) => console.error(e));
     showToast('Dokumen diduplikasi ke riwayat');
   };
 
@@ -911,18 +1202,433 @@ export default function App() {
     await handleSaveSettings(next);
   };
 
-  const handleSignInGoogle = async () => {
+  // Subscribe to in-memory Google Drive access token
+  useEffect(() => {
+    return subscribeDriveToken((tok) => {
+      setDriveToken(tok);
+      if (!tok) {
+        setDriveFolder(null);
+        setDriveFiles([]);
+      }
+    });
+  }, []);
+
+  const refreshDriveFiles = useCallback(
+    async (tokenOverride?: string) => {
+      const tok = tokenOverride || driveToken;
+      if (!tok) return;
+      setIsDriveSyncing(true);
+      try {
+        const res = await listAppDriveFiles(tok);
+        setDriveFolder(res.folder);
+        setDriveFiles(res.files);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Gagal memuat folder Drive', 'error');
+      } finally {
+        setIsDriveSyncing(false);
+      }
+    },
+    [driveToken, showToast]
+  );
+
+  useEffect(() => {
+    if (driveToken) {
+      refreshDriveFiles(driveToken).catch(() => {});
+    }
+  }, [driveToken, refreshDriveFiles]);
+
+  const handleConnectDrive = async () => {
+    setIsDriveSyncing(true);
     try {
-      await signInWithPopup(auth, googleProvider);
-      showToast('Berhasil masuk dengan akun Google');
+      const token = await connectGoogleDriveAccess();
+      await refreshDriveFiles(token);
+      showToast('Google Drive berhasil terhubung ke 1 folder khusus Anda');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Gagal masuk dengan Google', 'error');
+      showToast(
+        err instanceof Error ? err.message : 'Gagal menghubungkan Google Drive',
+        'error'
+      );
+    } finally {
+      setIsDriveSyncing(false);
+    }
+  };
+
+  const syncPayloadsToDriveSafe = useCallback(
+    async (payloads: DriveUploadPayload[], quietIfNoToken = false) => {
+      if (payloads.length === 0) return;
+      if (!driveToken) {
+        if (!quietIfNoToken) {
+          showToast('Silakan hubungkan Google Drive terlebih dahulu.', 'error');
+        }
+        return;
+      }
+      setIsDriveSyncing(true);
+      try {
+        const plan = await prepareDriveSyncPlan(driveToken, payloads);
+        setDriveFolder(plan.folder);
+
+        // New datasets/files that don't exist yet are saved immediately in the single folder
+        for (const item of plan.newItems) {
+          await createDriveFile(driveToken, plan.folder.id, item);
+        }
+
+        if (plan.conflicts.length > 0) {
+          // Never overwrite existing Google Drive files silently: ask explicit confirmation!
+          setPendingDriveConfirm({
+            kind: 'overwrite',
+            plan,
+          });
+        } else if (plan.newItems.length > 0) {
+          await refreshDriveFiles(driveToken);
+          showToast(
+            `${plan.newItems.length} file baru tersimpan di folder Google Drive "${plan.folder.name}"`
+          );
+        }
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Gagal menyinkronkan ke Google Drive',
+          'error'
+        );
+      } finally {
+        setIsDriveSyncing(false);
+      }
+    },
+    [driveToken, refreshDriveFiles, showToast]
+  );
+
+  const handleSyncScoresToDrive = useCallback(
+    async (scoresOverride?: StudentScoreEntry[], quietIfNoToken = false) => {
+      const targetScores = scoresOverride || studentScores;
+      if (targetScores.length === 0) {
+        if (!quietIfNoToken) {
+          showToast('Belum ada data nilai untuk disimpan ke Google Drive.', 'error');
+        }
+        return;
+      }
+      const payloads = await buildScoreDatasetPayloads({
+        scores: targetScores,
+        schoolName: settings.schoolName,
+        exportedBy:
+          userProfile?.displayName || user?.displayName || user?.email || 'Pengguna',
+        includeMasterRecap: true,
+      });
+      await syncPayloadsToDriveSafe(payloads, quietIfNoToken);
+    },
+    [studentScores, settings.schoolName, userProfile, user, syncPayloadsToDriveSafe, showToast]
+  );
+
+  const handleSyncAllDataToDrive = useCallback(async () => {
+    const allPayloads: DriveUploadPayload[] = [];
+    if (studentScores.length > 0) {
+      const scorePayloads = await buildScoreDatasetPayloads({
+        scores: studentScores,
+        schoolName: settings.schoolName,
+        exportedBy:
+          userProfile?.displayName || user?.displayName || user?.email || 'Pengguna',
+        includeMasterRecap: true,
+      });
+      allPayloads.push(...scorePayloads);
+    }
+
+    const docsToSync =
+      userProfile?.role === 'admin' && sharedDocuments.length > 0
+        ? sharedDocuments
+        : documents;
+
+    for (const d of docsToSync) {
+      const tpl =
+        templates.find((t) => t.id === d.templateId) ||
+        (d.formatConfig?.direction === 'rtl' ? templates[1] : templates[0]) ||
+        activeTemplate;
+      const docxPayload = await buildExamDocxDrivePayload({
+        examDoc: d,
+        template: tpl,
+        logoDataUrl: settings.logoDataUrl,
+      });
+      allPayloads.push(docxPayload);
+    }
+
+    allPayloads.push(...buildMetadataBackupPayloads(settings, subjects));
+    await syncPayloadsToDriveSafe(allPayloads, false);
+  }, [
+    studentScores,
+    settings,
+    userProfile,
+    user,
+    sharedDocuments,
+    documents,
+    templates,
+    activeTemplate,
+    subjects,
+    syncPayloadsToDriveSafe,
+  ]);
+
+  const handleConfirmOverwriteDrive = async () => {
+    if (!pendingDriveConfirm?.plan || !driveToken) return;
+    setIsDriveSyncing(true);
+    try {
+      const { conflicts } = pendingDriveConfirm.plan;
+      for (const c of conflicts) {
+        await updateDriveFile(driveToken, c.existingFile.id, c.payload);
+      }
+      setPendingDriveConfirm(null);
+      await refreshDriveFiles(driveToken);
+      showToast(`${conflicts.length} file di Google Drive berhasil diperbarui`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Gagal memperbarui file Drive', 'error');
+    } finally {
+      setIsDriveSyncing(false);
+    }
+  };
+
+  const handleConfirmSaveAsNewDrive = async () => {
+    if (!pendingDriveConfirm?.plan || !driveToken) return;
+    setIsDriveSyncing(true);
+    try {
+      const { folder, conflicts } = pendingDriveConfirm.plan;
+      for (const c of conflicts) {
+        await createDriveFile(driveToken, folder.id, {
+          ...c.payload,
+          fileName: withTimestampSuffix(c.payload.fileName),
+        });
+      }
+      setPendingDriveConfirm(null);
+      await refreshDriveFiles(driveToken);
+      showToast(`${conflicts.length} file versi baru tersimpan di folder Google Drive`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Gagal membuat file baru di Drive', 'error');
+    } finally {
+      setIsDriveSyncing(false);
+    }
+  };
+
+  const handleConfirmDeleteDrive = async () => {
+    if (!pendingDriveConfirm?.deleteTarget || !driveToken) return;
+    setIsDriveSyncing(true);
+    try {
+      const target = pendingDriveConfirm.deleteTarget;
+      await deleteDriveFile(driveToken, target.id);
+      setPendingDriveConfirm(null);
+      await refreshDriveFiles(driveToken);
+      showToast(`File "${target.name}" dihapus dari Google Drive`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Gagal menghapus file Drive', 'error');
+    } finally {
+      setIsDriveSyncing(false);
+    }
+  };
+
+  const handleSignInGoogle = async (role: UserRole = selectedPortalRole) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      setSelectedPortalRole(role);
+      pendingProfileMetaRef.current = {
+        role,
+        enforceAdminCheck: role === 'admin',
+      };
+      const { accessToken } = await signInWithGoogleAndCaptureDriveToken();
+      if (accessToken) {
+        showToast('Berhasil masuk dengan email Google & Google Drive terhubung');
+      } else {
+        showToast('Berhasil masuk dengan email Google');
+      }
+    } catch (err) {
+      pendingProfileMetaRef.current = null;
+      const msg = mapFirebaseAuthError(err);
+      setAuthError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignInEmailPassword = async (
+    role: UserRole,
+    emailInput: string,
+    passwordInput: string
+  ) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      setSelectedPortalRole(role);
+      pendingProfileMetaRef.current = {
+        role,
+        enforceAdminCheck: role === 'admin',
+      };
+      const cred = await signInWithEmailAndPassword(auth, emailInput, passwordInput);
+      if (!cred.user.emailVerified) {
+        setAuthNotice(
+          `Email ${cred.user.email} belum terverifikasi. Silakan klik tautan verifikasi di kotak masuk Anda.`
+        );
+      } else {
+        showToast('Berhasil masuk dengan email');
+      }
+    } catch (err) {
+      pendingProfileMetaRef.current = null;
+      const msg = mapFirebaseAuthError(err);
+      setAuthError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleRegisterGuruEmail = async (
+    emailInput: string,
+    passwordInput: string,
+    displayNameInput: string,
+    subjectSpecialtyInput: string
+  ) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      setSelectedPortalRole('guru');
+      pendingProfileMetaRef.current = {
+        role: 'guru',
+        displayName: displayNameInput,
+        subjectSpecialty: subjectSpecialtyInput,
+      };
+      const cred = await createUserWithEmailAndPassword(auth, emailInput, passwordInput);
+      if (displayNameInput) {
+        await updateProfile(cred.user, { displayName: displayNameInput }).catch(() => {});
+      }
+      await sendEmailVerification(cred.user);
+      setAuthNotice(
+        `Akun berhasil dibuat. Email verifikasi telah dikirim ke ${emailInput}. Cek inbox/spam Anda lalu klik verifikasi.`
+      );
+    } catch (err) {
+      pendingProfileMetaRef.current = null;
+      const msg = mapFirebaseAuthError(err);
+      setAuthError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleResetPassword = async (emailInput: string) => {
+    if (!emailInput) {
+      setAuthError('Masukkan alamat email terlebih dahulu untuk reset sandi.');
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      await sendPasswordResetEmail(auth, emailInput);
+      setAuthNotice(`Tautan reset kata sandi telah dikirim ke ${emailInput}.`);
+    } catch (err) {
+      setAuthError(mapFirebaseAuthError(err));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    if (!auth.currentUser) return;
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await sendEmailVerification(auth.currentUser);
+      setAuthNotice(`Email verifikasi baru dikirim ulang ke ${auth.currentUser.email}.`);
+    } catch (err) {
+      setAuthError(mapFirebaseAuthError(err));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleReloadVerification = async () => {
+    if (!auth.currentUser) return;
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await reload(auth.currentUser);
+      if (auth.currentUser.emailVerified) {
+        const profile = await ensureUserProfile(selectedPortalRole);
+        setUserProfile(profile);
+        setUser({ ...auth.currentUser });
+        setShowLandingPortal(false);
+        showToast('Email berhasil diverifikasi! Selamat datang.');
+      } else {
+        setAuthError(
+          'Email masih belum berstatus terverifikasi. Pastikan Anda sudah mengklik tautan di email.'
+        );
+      }
+    } catch (err) {
+      setAuthError(mapFirebaseAuthError(err));
+    } finally {
+      setAuthBusy(false);
     }
   };
 
   const handleSignOut = async () => {
-    await signOut(auth);
-    showToast('Berhasil keluar dari akun');
+    setAuthBusy(true);
+    try {
+      await signOut(auth);
+      setUserProfile(null);
+      setShowLandingPortal(true);
+      setAuthError(null);
+      setAuthNotice(null);
+      showToast('Berhasil keluar dari akun');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  // Student Score Handlers (Auto-saves to local cache + centralized Firestore + Google Drive if connected)
+  const handleSaveScore = async (entry: StudentScoreEntry) => {
+    const exists = studentScores.some((s) => s.id === entry.id);
+    const nextList = exists
+      ? studentScores.map((s) => (s.id === entry.id ? entry : s))
+      : [entry, ...studentScores];
+    setStudentScores(nextList);
+    saveLocalScores(nextList);
+    await syncSaveStudentScore(entry);
+    if (driveToken) {
+      const sameDataset = nextList.filter(
+        (s) =>
+          s.subjectName.trim() === entry.subjectName.trim() &&
+          s.className.trim() === entry.className.trim()
+      );
+      await handleSyncScoresToDrive(sameDataset, true);
+    }
+  };
+
+  const handleSaveScoresBatch = async (entries: StudentScoreEntry[]) => {
+    const nextList = [...entries, ...studentScores];
+    setStudentScores(nextList);
+    saveLocalScores(nextList);
+    for (const entry of entries) {
+      await syncSaveStudentScore(entry);
+    }
+    if (driveToken && entries.length > 0) {
+      const sample = entries[0];
+      const sameDataset = nextList.filter(
+        (s) =>
+          s.subjectName.trim() === sample.subjectName.trim() &&
+          s.className.trim() === sample.className.trim()
+      );
+      await handleSyncScoresToDrive(sameDataset, true);
+    }
+  };
+
+  const handleDeleteScore = async (scoreId: string) => {
+    setStudentScores((prev) => {
+      const next = prev.filter((s) => s.id !== scoreId);
+      saveLocalScores(next);
+      return next;
+    });
+    await syncDeleteStudentScore(scoreId);
+    showToast('Data nilai dihapus');
+  };
+
+  const handleOpenSharedDocumentAsAdmin = (sharedDoc: SharedExamDocument) => {
+    handleOpenDocument(sharedDoc);
   };
 
   const handleExportBackupJson = () => {
@@ -931,6 +1637,7 @@ export default function App() {
       settings,
       subjects,
       documents,
+      studentScores,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -941,8 +1648,78 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const activeNavMeta = NAV_ITEMS.find((n) => n.id === activeTab)!;
+  const effectiveRole: UserRole = userProfile?.role || 'guru';
+
+  const navItems = useMemo(() => {
+    if (effectiveRole === 'admin') {
+      return [BASE_NAV_ITEMS[0], ADMIN_NAV_ITEM, ...BASE_NAV_ITEMS.slice(1)];
+    }
+    return BASE_NAV_ITEMS;
+  }, [effectiveRole]);
+
+  const activeNavMeta = navItems.find((n) => n.id === activeTab) || navItems[0];
   const headerSubjectDisplay = stripRichHtml(identity.subjectFormalName || '').trim();
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-center space-y-2">
+          <div className="w-8 h-8 border-2 border-[#0F1E3D] border-t-transparent rounded-full animate-spin mx-auto" />
+          <p className="text-xs font-medium text-slate-600">Memuat Portal Akademik...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (showLandingPortal || !user || !user.emailVerified) {
+    return (
+      <ErrorBoundary>
+        <LandingAuthPortal
+          schoolName={settings.schoolName}
+          user={user}
+          userProfile={userProfile}
+          selectedRole={selectedPortalRole}
+          onSelectRole={(r) => {
+            setSelectedPortalRole(r);
+            setAuthError(null);
+            setAuthNotice(null);
+          }}
+          onSignInGoogle={handleSignInGoogle}
+          onSignInEmailPassword={handleSignInEmailPassword}
+          onRegisterGuruEmail={handleRegisterGuruEmail}
+          onResetPassword={handleResetPassword}
+          onResendVerification={handleResendVerification}
+          onReloadVerification={handleReloadVerification}
+          onSignOut={handleSignOut}
+          onEnterWorkspace={() => setShowLandingPortal(false)}
+          authError={authError}
+          authNotice={authNotice}
+          isBusy={authBusy}
+        />
+      </ErrorBoundary>
+    );
+  }
+
+  const driveSyncPanelNode = (
+    <GoogleDriveSyncPanel
+      driveConnected={Boolean(driveToken)}
+      driveFolder={driveFolder}
+      driveFiles={driveFiles}
+      isSyncing={isDriveSyncing}
+      hasScores={studentScores.length > 0}
+      hasDocuments={documents.length > 0 || sharedDocuments.length > 0}
+      onConnectDrive={handleConnectDrive}
+      onRefreshFiles={() => refreshDriveFiles()}
+      onSyncScoresToDrive={() => handleSyncScoresToDrive()}
+      onSyncAllDataToDrive={handleSyncAllDataToDrive}
+      onRequestDeleteFile={(file) =>
+        setPendingDriveConfirm({
+          kind: 'delete',
+          deleteTarget: file,
+        })
+      }
+    />
+  );
 
   return (
     <ErrorBoundary>
@@ -961,7 +1738,7 @@ export default function App() {
                   SMART QUESTION
                 </div>
                 <div className="text-[11px] font-medium text-sky-300 tracking-wider uppercase">
-                  Document Generator
+                  {effectiveRole === 'admin' ? 'Portal Admin' : 'Portal Ustadz / Guru'}
                 </div>
               </div>
               <button
@@ -975,7 +1752,7 @@ export default function App() {
 
             {/* Primary Nav */}
             <nav className="p-3 space-y-1">
-              {NAV_ITEMS.map((item) => {
+              {navItems.map((item) => {
                 const Icon = item.icon;
                 const active = activeTab === item.id;
                 return (
@@ -1000,14 +1777,29 @@ export default function App() {
             </nav>
           </div>
 
-          {/* Sidebar Footer: Account & School Context */}
-          <div className="p-4 border-t border-white/10 space-y-3">
+          {/* Sidebar Footer: Account, Laman Utama & School Context */}
+          <div className="p-4 border-t border-white/10 space-y-2.5">
             <div className="text-xs text-slate-300">
-              <div className="font-semibold text-white truncate">{settings.schoolName}</div>
-              <div className="text-[11px] text-slate-400 mt-0.5 truncate">
+              <div className="font-semibold text-white truncate">
+                {userProfile?.displayName || user?.displayName || settings.schoolName}
+              </div>
+              <div className="text-[11px] text-sky-300 font-medium mt-0.5 truncate">
+                {effectiveRole === 'admin' ? 'Admin Sistem' : 'Ustadz / Guru'}
+              </div>
+              <div className="text-[11px] text-slate-400 truncate">
                 {user ? user.email : 'Penyimpanan Lokal Aktif'}
               </div>
             </div>
+
+            <button
+              type="button"
+              onClick={() => setShowLandingPortal(true)}
+              className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium bg-white/5 hover:bg-white/10 text-slate-200 rounded-lg transition-colors"
+            >
+              <Home className="w-3.5 h-3.5" />
+              Laman Utama
+            </button>
+
             {user ? (
               <button
                 type="button"
@@ -1020,11 +1812,11 @@ export default function App() {
             ) : (
               <button
                 type="button"
-                onClick={handleSignInGoogle}
+                onClick={() => handleSignInGoogle(selectedPortalRole)}
                 className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-400/30 rounded-lg transition-colors"
               >
                 <LogIn className="w-3.5 h-3.5" />
-                Sinkronisasi Google
+                Masuk dengan Email
               </button>
             )}
           </div>
@@ -1060,9 +1852,15 @@ export default function App() {
                 {headerSubjectDisplay || 'Mapel Diisi Guru'}
               </span>
               <span aria-hidden="true">·</span>
-              <span className="truncate max-w-[240px]">{activeTemplate.name}</span>
+              <span className="truncate max-w-[200px]">{activeTemplate.name}</span>
               <span aria-hidden="true">·</span>
               <span className="tabular-nums">{parsedQuestions.length} Soal</span>
+              {autoSyncLabel && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-emerald-700 font-medium">{autoSyncLabel}</span>
+                </>
+              )}
             </div>
 
             <div className="flex items-center gap-3 shrink-0">
@@ -1088,6 +1886,22 @@ export default function App() {
                 onCreateNewDocument={handleCreateNewDocument}
                 onOpenDocument={handleOpenDocument}
                 onDownloadDocx={handleDownloadHistoryDocx}
+              />
+            )}
+
+            {activeTab === 'admin' && effectiveRole === 'admin' && (
+              <AdminMonitorView
+                schoolName={settings.schoolName}
+                adminName={teacherAttrInfo.displayName}
+                sharedDocuments={sharedDocuments}
+                studentScores={studentScores}
+                userProfiles={allUserProfiles}
+                onOpenSharedDocument={handleOpenSharedDocumentAsAdmin}
+                onDownloadSharedDocx={handleDownloadHistoryDocx}
+                onDownloadSharedPdf={handleDownloadHistoryPdf}
+                onGoToGradesTab={() => setActiveTab('grades')}
+                onToast={showToast}
+                drivePanel={driveSyncPanelNode}
               />
             )}
 
@@ -1132,6 +1946,26 @@ export default function App() {
               />
             )}
 
+            {activeTab === 'grades' && (
+              <GradesRecapView
+                role={effectiveRole}
+                currentUserEmail={user?.email || ''}
+                currentUserUid={user?.uid || ''}
+                currentUserName={teacherAttrInfo.displayName}
+                schoolName={settings.schoolName}
+                defaultSemester={settings.semester}
+                defaultAcademicYear={settings.academicYear}
+                documents={effectiveRole === 'admin' && sharedDocuments.length > 0 ? sharedDocuments : documents}
+                scores={studentScores}
+                userProfiles={allUserProfiles}
+                onSaveScore={handleSaveScore}
+                onSaveScoresBatch={handleSaveScoresBatch}
+                onDeleteScore={handleDeleteScore}
+                onToast={showToast}
+                drivePanel={driveSyncPanelNode}
+              />
+            )}
+
             {activeTab === 'templates' && (
               <TemplateManagerView
                 templates={templates}
@@ -1168,17 +2002,30 @@ export default function App() {
             )}
 
             {activeTab === 'settings' && (
-              <WebsiteSettingsView
-                settings={settings}
-                onSaveSettings={handleSaveSettings}
-                user={user}
-                onSignInGoogle={handleSignInGoogle}
-                onSignOut={handleSignOut}
-                onExportBackupJson={handleExportBackupJson}
-              />
+              <div className="space-y-6">
+                {driveSyncPanelNode}
+                <WebsiteSettingsView
+                  settings={settings}
+                  onSaveSettings={handleSaveSettings}
+                  user={user}
+                  onSignInGoogle={() => handleSignInGoogle(selectedPortalRole)}
+                  onSignOut={handleSignOut}
+                  onExportBackupJson={handleExportBackupJson}
+                />
+              </div>
             )}
           </main>
         </div>
+
+        {/* Explicit Google Drive Confirmation Modal for Overwrite or Delete */}
+        <DriveActionConfirmModal
+          pending={pendingDriveConfirm}
+          isBusy={isDriveSyncing}
+          onConfirmOverwrite={handleConfirmOverwriteDrive}
+          onConfirmSaveAsNew={handleConfirmSaveAsNewDrive}
+          onConfirmDelete={handleConfirmDeleteDrive}
+          onCancel={() => setPendingDriveConfirm(null)}
+        />
 
         {/* Toast Feedback */}
         {toast && (

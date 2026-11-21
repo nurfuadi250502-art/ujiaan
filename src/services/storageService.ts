@@ -4,18 +4,24 @@ import {
   doc,
   getDoc,
   getDocs,
+  onSnapshot,
   query,
   serverTimestamp,
   setDoc,
   Timestamp,
   updateDoc,
   where,
+  type Unsubscribe,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
   ExamDocument,
+  SharedExamDocument,
+  StudentScoreEntry,
   SubjectConfig,
   TemplateDocument,
+  UserProfile,
+  UserRole,
   UserSettings,
 } from '../types/exam';
 import {
@@ -25,10 +31,13 @@ import {
   DEFAULT_USER_SETTINGS,
 } from '../data/defaults';
 
+export const PRIMARY_ADMIN_EMAIL = 'muhammad505220@gmail.com';
+
 const LS_SETTINGS_KEY = 'sqg_settings_v1';
 const LS_SUBJECTS_KEY = 'sqg_subjects_v1';
 const LS_TEMPLATES_KEY = 'sqg_templates_v1';
 const LS_DOCUMENTS_KEY = 'sqg_documents_v1';
+const LS_SCORES_KEY = 'sqg_scores_v1';
 
 // IndexedDB for storing large binary DOCX/PDF template data locally without hitting 5MB localStorage limits
 const IDB_NAME = 'sqg_binary_store';
@@ -237,11 +246,34 @@ export function saveLocalDocuments(docs: ExamDocument[]) {
   }
 }
 
+export function loadLocalScores(): StudentScoreEntry[] {
+  try {
+    const raw = localStorage.getItem(LS_SCORES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalScores(scores: StudentScoreEntry[]) {
+  try {
+    localStorage.setItem(LS_SCORES_KEY, JSON.stringify(scores));
+  } catch {
+    // Ignore
+  }
+}
+
 // Cloud Firestore Sync Operations (authenticated & email-verified user)
 function getVerifiedUid(): string | null {
   const user = auth.currentUser;
   if (!user || !user.emailVerified) return null;
   return user.uid;
+}
+
+export function isPrimaryAdminEmail(email?: string | null): boolean {
+  return Boolean(email && email.toLowerCase() === PRIMARY_ADMIN_EMAIL.toLowerCase());
 }
 
 export async function syncLoadAllFromCloud(): Promise<{
@@ -532,7 +564,169 @@ export async function syncDeleteTemplateFromCloud(templateId: string): Promise<v
   }
 }
 
-export async function syncSaveDocumentToCloud(examDoc: ExamDocument): Promise<void> {
+export async function ensureUserProfile(
+  preferredRole: UserRole = 'guru',
+  displayNameOverride?: string,
+  subjectSpecialty?: string
+): Promise<UserProfile | null> {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified) return null;
+
+  const uid = user.uid;
+  const email = (user.email || '').trim().slice(0, 200);
+  const path = `userProfiles/${uid}`;
+  const profileRef = doc(db, 'userProfiles', uid);
+
+  let hasAdminRecord = isPrimaryAdminEmail(email);
+  if (!hasAdminRecord) {
+    try {
+      const adminSnap = await getDoc(doc(db, 'admins', uid));
+      hasAdminRecord = adminSnap.exists();
+    } catch {
+      hasAdminRecord = false;
+    }
+  }
+
+  const effectiveRole: UserRole = hasAdminRecord ? 'admin' : 'guru';
+  const fallbackName =
+    displayNameOverride?.trim() ||
+    user.displayName?.trim() ||
+    email.split('@')[0] ||
+    (effectiveRole === 'admin' ? 'Administrator' : 'Ustadz / Guru');
+
+  try {
+    const existing = await getDoc(profileRef);
+    if (existing.exists()) {
+      const d = existing.data();
+      const nextDisplayName = (displayNameOverride?.trim() || String(d.displayName || fallbackName)).slice(0, 120);
+      const nextSpecialty =
+        subjectSpecialty !== undefined
+          ? subjectSpecialty.trim().slice(0, 120)
+          : typeof d.subjectSpecialty === 'string'
+          ? d.subjectSpecialty
+          : undefined;
+      const roleToPersist: UserRole =
+        hasAdminRecord && (preferredRole === 'admin' || d.role === 'admin')
+          ? 'admin'
+          : (d.role as UserRole) === 'admin' && hasAdminRecord
+          ? 'admin'
+          : 'guru';
+
+      const updateFields = stripUndefined({
+        email,
+        displayName: nextDisplayName,
+        role: roleToPersist,
+        subjectSpecialty: nextSpecialty,
+        updatedAt: serverTimestamp(),
+      });
+      await updateDoc(profileRef, updateFields);
+
+      return {
+        ownerId: uid,
+        email,
+        displayName: nextDisplayName,
+        role: roleToPersist,
+        subjectSpecialty: nextSpecialty,
+        createdAt: timestampToIso(d.createdAt),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    const createPayload = stripUndefined({
+      ownerId: uid,
+      email,
+      displayName: fallbackName.slice(0, 120),
+      role: effectiveRole,
+      subjectSpecialty: subjectSpecialty ? subjectSpecialty.trim().slice(0, 120) : undefined,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    await setDoc(profileRef, createPayload);
+
+    const nowIso = new Date().toISOString();
+    return {
+      ownerId: uid,
+      email,
+      displayName: fallbackName.slice(0, 120),
+      role: effectiveRole,
+      subjectSpecialty: subjectSpecialty ? subjectSpecialty.trim().slice(0, 120) : undefined,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export function buildSharedDocId(uid: string, sourceDocId: string): string {
+  return sanitizeId(`${uid}_${sanitizeId(sourceDocId)}`);
+}
+
+export async function syncSaveSharedDocument(
+  examDoc: ExamDocument,
+  teacherInfo?: { displayName?: string; email?: string }
+): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified) return;
+
+  const uid = user.uid;
+  const sourceDocId = sanitizeId(examDoc.id);
+  const sharedId = buildSharedDocId(uid, sourceDocId);
+  const path = `sharedDocuments/${sharedId}`;
+  const docRef = doc(db, 'sharedDocuments', sharedId);
+
+  const teacherEmail = (teacherInfo?.email || user.email || 'guru@sekolah.sch.id').slice(0, 200);
+  const teacherName = (
+    teacherInfo?.displayName ||
+    user.displayName ||
+    examDoc.identity?.teacherName ||
+    teacherEmail.split('@')[0] ||
+    'Ustadz / Guru'
+  )
+    .replace(/<[^>]+>/g, '')
+    .trim()
+    .slice(0, 120) || 'Ustadz / Guru';
+
+  const baseFields = stripUndefined({
+    teacherEmail,
+    teacherName,
+    title: examDoc.title.slice(0, 200),
+    subjectCode: examDoc.subjectCode.slice(0, 80),
+    subjectFormalName: examDoc.subjectFormalName.slice(0, 160),
+    className: examDoc.className.slice(0, 80),
+    questionCount: Math.min(1000, Math.max(0, examDoc.questionCount)),
+    templateId: examDoc.templateId.slice(0, 128),
+    templateName: examDoc.templateName.slice(0, 160),
+    status: examDoc.status,
+    rawText: examDoc.rawText.slice(0, 195000),
+    identity: examDoc.identity,
+    formatConfig: examDoc.formatConfig,
+    parsedQuestions: examDoc.parsedQuestions.slice(0, 500),
+    warnings: examDoc.warnings.slice(0, 200),
+    updatedAt: serverTimestamp(),
+  });
+
+  try {
+    const existing = await getDoc(docRef);
+    if (existing.exists()) {
+      await updateDoc(docRef, baseFields);
+    } else {
+      await setDoc(docRef, {
+        ownerId: uid,
+        sourceDocId,
+        ...baseFields,
+        createdAt: serverTimestamp(),
+      });
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export async function syncSaveDocumentToCloud(
+  examDoc: ExamDocument,
+  teacherInfo?: { displayName?: string; email?: string }
+): Promise<void> {
   const uid = getVerifiedUid();
   if (!uid) return;
   const docId = sanitizeId(examDoc.id);
@@ -570,6 +764,8 @@ export async function syncSaveDocumentToCloud(examDoc: ExamDocument): Promise<vo
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);
   }
+  // Automatically mirror to centralized sharedDocuments for real-time Guru + Admin visibility
+  await syncSaveSharedDocument(examDoc, teacherInfo);
 }
 
 export async function syncDeleteDocumentFromCloud(docIdRaw: string): Promise<void> {
@@ -579,7 +775,195 @@ export async function syncDeleteDocumentFromCloud(docIdRaw: string): Promise<voi
   const path = `users/${uid}/documents/${docId}`;
   try {
     await deleteDoc(doc(db, 'users', uid, 'documents', docId));
+    const sharedId = buildSharedDocId(uid, docId);
+    await deleteDoc(doc(db, 'sharedDocuments', sharedId)).catch(() => {
+      // Ignore if shared copy doesn't exist yet
+    });
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, path);
   }
 }
+
+export async function syncSaveStudentScore(entry: StudentScoreEntry): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified) return;
+
+  const uid = user.uid;
+  const scoreId = sanitizeId(entry.id);
+  const path = `studentScores/${scoreId}`;
+  const scoreRef = doc(db, 'studentScores', scoreId);
+
+  const clampedScore = Math.min(100, Math.max(0, Number(entry.score) || 0));
+  const baseFields = stripUndefined({
+    teacherEmail: (entry.teacherEmail || user.email || '').slice(0, 200),
+    teacherName: (entry.teacherName || user.displayName || 'Ustadz / Guru').slice(0, 120) || 'Ustadz / Guru',
+    documentId: entry.documentId ? sanitizeId(entry.documentId) : undefined,
+    examTitle: entry.examTitle.trim().slice(0, 200) || 'Ujian',
+    subjectName: entry.subjectName.trim().slice(0, 160) || 'Mata Pelajaran',
+    className: entry.className.trim().slice(0, 80) || '-',
+    semester: entry.semester ? entry.semester.trim().slice(0, 60) : undefined,
+    academicYear: entry.academicYear ? entry.academicYear.trim().slice(0, 60) : undefined,
+    studentName: entry.studentName.trim().slice(0, 140) || 'Siswa',
+    studentNis: entry.studentNis ? entry.studentNis.trim().slice(0, 60) : undefined,
+    score: clampedScore,
+    predicate: entry.predicate ? entry.predicate.trim().slice(0, 40) : undefined,
+    notes: entry.notes ? entry.notes.trim().slice(0, 300) : undefined,
+    updatedAt: serverTimestamp(),
+  });
+
+  try {
+    const existing = await getDoc(scoreRef);
+    if (existing.exists()) {
+      await updateDoc(scoreRef, baseFields);
+    } else {
+      await setDoc(scoreRef, {
+        ownerId: uid,
+        ...baseFields,
+        createdAt: serverTimestamp(),
+      });
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export async function syncDeleteStudentScore(scoreIdRaw: string): Promise<void> {
+  const uid = getVerifiedUid();
+  if (!uid) return;
+  const scoreId = sanitizeId(scoreIdRaw);
+  const path = `studentScores/${scoreId}`;
+  try {
+    await deleteDoc(doc(db, 'studentScores', scoreId));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
+}
+
+export function subscribeSharedDocuments(
+  uid: string,
+  isAdminMode: boolean,
+  onData: (docs: SharedExamDocument[]) => void,
+  onError?: (err: unknown) => void
+): Unsubscribe {
+  const colRef = collection(db, 'sharedDocuments');
+  const q = isAdminMode ? query(colRef) : query(colRef, where('ownerId', '==', uid));
+  const path = 'sharedDocuments';
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((docSnap) => {
+          const d = docSnap.data();
+          return {
+            id: docSnap.id,
+            ownerId: String(d.ownerId),
+            sourceDocId: String(d.sourceDocId || docSnap.id),
+            teacherEmail: String(d.teacherEmail || ''),
+            teacherName: String(d.teacherName || 'Ustadz / Guru'),
+            title: String(d.title || ''),
+            subjectCode: String(d.subjectCode || '-'),
+            subjectFormalName: String(d.subjectFormalName || '-'),
+            className: String(d.className || '-'),
+            questionCount: Number(d.questionCount || 0),
+            templateId: String(d.templateId || 'tpl_kmi_latin'),
+            templateName: String(d.templateName || ''),
+            status: (d.status as ExamDocument['status']) || 'draft',
+            rawText: String(d.rawText || ''),
+            identity: d.identity,
+            formatConfig: d.formatConfig,
+            parsedQuestions: Array.isArray(d.parsedQuestions) ? d.parsedQuestions : [],
+            warnings: Array.isArray(d.warnings) ? d.warnings : [],
+            createdAt: timestampToIso(d.createdAt),
+            updatedAt: timestampToIso(d.updatedAt),
+          } as SharedExamDocument;
+        })
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      onData(list);
+    },
+    (err) => {
+      if (onError) onError(err);
+      handleFirestoreError(err, OperationType.LIST, path);
+    }
+  );
+}
+
+export function subscribeStudentScores(
+  uid: string,
+  isAdminMode: boolean,
+  onData: (scores: StudentScoreEntry[]) => void,
+  onError?: (err: unknown) => void
+): Unsubscribe {
+  const colRef = collection(db, 'studentScores');
+  const q = isAdminMode ? query(colRef) : query(colRef, where('ownerId', '==', uid));
+  const path = 'studentScores';
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((docSnap) => {
+          const d = docSnap.data();
+          return {
+            id: docSnap.id,
+            ownerId: String(d.ownerId),
+            teacherEmail: String(d.teacherEmail || ''),
+            teacherName: String(d.teacherName || 'Ustadz / Guru'),
+            documentId: typeof d.documentId === 'string' ? d.documentId : undefined,
+            examTitle: String(d.examTitle || ''),
+            subjectName: String(d.subjectName || ''),
+            className: String(d.className || ''),
+            semester: typeof d.semester === 'string' ? d.semester : undefined,
+            academicYear: typeof d.academicYear === 'string' ? d.academicYear : undefined,
+            studentName: String(d.studentName || ''),
+            studentNis: typeof d.studentNis === 'string' ? d.studentNis : undefined,
+            score: Number(d.score ?? 0),
+            predicate: String(d.predicate || ''),
+            notes: typeof d.notes === 'string' ? d.notes : undefined,
+            createdAt: timestampToIso(d.createdAt),
+            updatedAt: timestampToIso(d.updatedAt),
+          } as StudentScoreEntry;
+        })
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      onData(list);
+    },
+    (err) => {
+      if (onError) onError(err);
+      handleFirestoreError(err, OperationType.LIST, path);
+    }
+  );
+}
+
+export function subscribeUserProfiles(
+  onData: (profiles: UserProfile[]) => void,
+  onError?: (err: unknown) => void
+): Unsubscribe {
+  const colRef = collection(db, 'userProfiles');
+  const path = 'userProfiles';
+
+  return onSnapshot(
+    query(colRef),
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((docSnap) => {
+          const d = docSnap.data();
+          return {
+            ownerId: String(d.ownerId || docSnap.id),
+            email: String(d.email || ''),
+            displayName: String(d.displayName || ''),
+            role: (d.role as UserRole) || 'guru',
+            subjectSpecialty: typeof d.subjectSpecialty === 'string' ? d.subjectSpecialty : undefined,
+            createdAt: timestampToIso(d.createdAt),
+            updatedAt: timestampToIso(d.updatedAt),
+          } as UserProfile;
+        })
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      onData(list);
+    },
+    (err) => {
+      if (onError) onError(err);
+      handleFirestoreError(err, OperationType.LIST, path);
+    }
+  );
+}
+

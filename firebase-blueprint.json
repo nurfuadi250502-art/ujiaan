@@ -1,5 +1,67 @@
 {
   "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Account profile and assigned role (admin or guru) for portal access and teacher attribution.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "guru"]
+        },
+        "subjectSpecialty": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Whitelist record granting admin privileges to a verified UID.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "assignedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["email", "assignedBy", "createdAt"]
+    },
     "UserSettings": {
       "title": "UserSettings",
       "description": "Default school identity, formatting preferences, and website settings owned by a user.",
@@ -245,9 +307,199 @@
         }
       },
       "required": ["ownerId", "title", "subjectCode", "subjectFormalName", "questionCount", "status", "rawText", "createdAt", "updatedAt"]
+    },
+    "SharedExamDocument": {
+      "title": "SharedExamDocument",
+      "description": "Centralized copy of teacher exam document visible automatically to both the owning teacher and system admin.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sourceDocId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "teacherEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "teacherName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "subjectCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "subjectFormalName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "className": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "questionCount": {
+          "type": "number"
+        },
+        "templateId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "templateName": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "ready", "exported"]
+        },
+        "rawText": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "identity": {
+          "type": "object"
+        },
+        "formatConfig": {
+          "type": "object"
+        },
+        "parsedQuestions": {
+          "type": "array"
+        },
+        "warnings": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "sourceDocId", "teacherEmail", "teacherName", "title", "subjectCode", "subjectFormalName", "questionCount", "status", "rawText", "createdAt", "updatedAt"]
+    },
+    "StudentScore": {
+      "title": "StudentScore",
+      "description": "Student exam score entered by an Ustadz/Guru, synced automatically to both the teacher recap and admin system.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "teacherEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "teacherName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "documentId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "examTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "subjectName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "className": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "semester": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "academicYear": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "studentName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "studentNis": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "score": {
+          "type": "number"
+        },
+        "predicate": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "teacherEmail", "teacherName", "examTitle", "subjectName", "className", "studentName", "score", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
+    "/userProfiles/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Account role and profile records for Admin and Ustadz/Guru."
+    },
+    "/admins/{adminUid}": {
+      "schema": {
+        "$ref": "#/entities/AdminRecord"
+      },
+      "description": "Admin authorization whitelist."
+    },
+    "/sharedDocuments/{docId}": {
+      "schema": {
+        "$ref": "#/entities/SharedExamDocument"
+      },
+      "description": "Centralized teacher exam submissions visible to owning teacher and admin."
+    },
+    "/studentScores/{scoreId}": {
+      "schema": {
+        "$ref": "#/entities/StudentScore"
+      },
+      "description": "Student exam scores entered by teachers and aggregated for admin recap and Excel export."
+    },
     "/users/{userId}": {
       "schema": {
         "$ref": "#/entities/UserSettings"
