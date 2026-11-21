@@ -26,8 +26,23 @@ import {
   Printer,
   Download,
   Palette,
+  MousePointer2,
+  Hand,
+  PenTool,
+  Type,
+  ImagePlus,
+  Square,
+  Minus,
+  Grid,
+  Columns2,
+  Maximize2,
+  Minimize2,
+  GripVertical,
+  Eraser,
 } from 'lucide-react';
 import type {
+  CanvasElement,
+  CanvasToolMode,
   ExamIdentity,
   FormatConfig,
   ParsedQuestion,
@@ -46,6 +61,7 @@ import {
   toEasternArabicDigits,
 } from '../utils/ruleParser';
 import { sanitizeRichHtml, stripRichHtml } from '../utils/richText';
+import { CanvasLayerOverlay } from './CanvasLayerOverlay';
 
 interface LiveDocumentPreviewProps {
   template: TemplateDocument;
@@ -64,6 +80,8 @@ interface LiveDocumentPreviewProps {
   onExportDocx?: () => void;
   onExportPdf?: () => void;
   isExportingDocx?: boolean;
+  isFullscreenCanvas?: boolean;
+  onToggleFullscreenCanvas?: () => void;
 }
 
 function getPaperSizeMm(paperSize: FormatConfig['paperSize']): { w: number; h: number } {
@@ -264,12 +282,24 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
   onExportDocx,
   onExportPdf,
   isExportingDocx = false,
+  isFullscreenCanvas = false,
+  onToggleFullscreenCanvas,
 }) => {
   const [zoom, setZoom] = useState<number>(0.85);
   const [activeQuestionId, setActiveQuestionId] = useState<string | null>(null);
   const [showColorMenu, setShowColorMenu] = useState(false);
   const [showHighlightMenu, setShowHighlightMenu] = useState(false);
   const [marginPreset, setMarginPreset] = useState<'custom' | 'normal' | 'narrow' | 'wide'>('custom');
+  const [toolMode, setToolMode] = useState<CanvasToolMode>('select');
+  const [isSpaceHeld, setIsSpaceHeld] = useState(false);
+  const [drawColor, setDrawColor] = useState<string>('#0F1E3D');
+  const [drawWidthMm, setDrawWidthMm] = useState<number>(0.55);
+  const [selectedCanvasElId, setSelectedCanvasElId] = useState<string | null>(null);
+  const [activePageIndex, setActivePageIndex] = useState<number>(0);
+  const [showMarginGuides, setShowMarginGuides] = useState<boolean>(false);
+  const [pageLayoutMode, setPageLayoutMode] = useState<'single' | 'spread'>('single');
+  const [dragFromIdx, setDragFromIdx] = useState<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [activeFormats, setActiveFormats] = useState({
     bold: false,
     italic: false,
@@ -280,6 +310,9 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
   });
 
   const activeEditableElRef = useRef<HTMLElement | null>(null);
+  const canvasViewportRef = useRef<HTMLDivElement>(null);
+  const canvasImageInputRef = useRef<HTMLInputElement>(null);
+  const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const paper = getPaperSizeMm(format.paperSize);
   const isRtl = format.direction === 'rtl';
   const effectiveLogo = logoDataUrl || template.logoDataUrl;
@@ -313,6 +346,45 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
     document.addEventListener('selectionchange', syncCommandStates);
     return () => document.removeEventListener('selectionchange', syncCommandStates);
   }, []);
+
+  // Spacebar temporary Hand/Pan mode & Delete selected canvas object
+  useEffect(() => {
+    const isTypingInDom = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      return (
+        target.isContentEditable ||
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT'
+      );
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !isTypingInDom(e.target)) {
+        e.preventDefault();
+        setIsSpaceHeld(true);
+      } else if (
+        (e.key === 'Delete' || e.key === 'Backspace') &&
+        selectedCanvasElId &&
+        !isTypingInDom(e.target)
+      ) {
+        e.preventDefault();
+        const nextEls = (format.canvasElements || []).filter((x) => x.id !== selectedCanvasElId);
+        onChangeFormatConfig?.({ ...format, canvasElements: nextEls });
+        setSelectedCanvasElId(null);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpaceHeld(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, [selectedCanvasElId, format, onChangeFormatConfig]);
 
   const execRibbonCommand = (command: string, value?: string) => {
     try {
@@ -569,6 +641,178 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
     if (activeQuestionId === qId) setActiveQuestionId(null);
   };
 
+  const handleReorderQuestion = (fromIdx: number, toIdx: number) => {
+    if (!onChangeQuestions || fromIdx === toIdx) return;
+    if (fromIdx < 0 || fromIdx >= questions.length || toIdx < 0 || toIdx >= questions.length) return;
+    const next = [...questions];
+    const [moved] = next.splice(fromIdx, 1);
+    const targetNeighbor = next[Math.min(toIdx, next.length - 1)];
+    if (targetNeighbor && getSectionKey(moved.sectionTitle) !== getSectionKey(targetNeighbor.sectionTitle)) {
+      moved.sectionTitle = targetNeighbor.sectionTitle;
+    }
+    next.splice(toIdx, 0, moved);
+    onChangeQuestions(renumberQuestionsBySection(next));
+  };
+
+  const canvasElements = format.canvasElements || [];
+
+  const updateCanvasElements = (nextEls: CanvasElement[]) => {
+    onChangeFormatConfig?.({ ...format, canvasElements: nextEls });
+  };
+
+  const handleAddCanvasElement = (el: CanvasElement) => {
+    updateCanvasElements([...canvasElements, el]);
+    setSelectedCanvasElId(el.id);
+    if (toolMode === 'pan') setToolMode('select');
+  };
+
+  const handleUpdateCanvasElement = (updated: CanvasElement) => {
+    updateCanvasElements(canvasElements.map((x) => (x.id === updated.id ? updated : x)));
+  };
+
+  const handleDeleteCanvasElement = (id: string) => {
+    updateCanvasElements(canvasElements.filter((x) => x.id !== id));
+    if (selectedCanvasElId === id) setSelectedCanvasElId(null);
+  };
+
+  const addQuickCanvasObject = (kind: 'text' | 'box' | 'line') => {
+    const id = `cv_${kind}_${Date.now()}`;
+    const targetPage = Math.min(activePageIndex, Math.max(0, pages.length - 1));
+    if (kind === 'text') {
+      handleAddCanvasElement({
+        id,
+        pageIndex: targetPage,
+        kind: 'text',
+        xMm: Math.max(20, paper.w - 75),
+        yMm: 22,
+        wMm: 52,
+        hMm: 14,
+        text: isRtl ? 'الدرجة: ٢٠' : 'Catatan / Skor: 20',
+        fontSizePt: 11,
+        color: '#0F172A',
+        bgColor: 'rgba(255,255,255,0.92)',
+        borderColor: '#0F1E3D',
+        bold: true,
+        align: 'center',
+      });
+    } else if (kind === 'box') {
+      handleAddCanvasElement({
+        id,
+        pageIndex: targetPage,
+        kind: 'box',
+        xMm: 22,
+        yMm: Math.round(paper.h * 0.55),
+        wMm: paper.w - 44,
+        hMm: 34,
+        strokeColor: '#0F172A',
+        fillColor: 'transparent',
+        strokeWidthMm: 0.4,
+        dashed: true,
+      });
+    } else {
+      handleAddCanvasElement({
+        id,
+        pageIndex: targetPage,
+        kind: 'line',
+        xMm: 22,
+        yMm: Math.round(paper.h * 0.5),
+        wMm: paper.w - 44,
+        hMm: 2,
+        strokeColor: '#0F172A',
+        strokeWidthMm: 0.5,
+        dashed: false,
+      });
+    }
+    setToolMode('select');
+  };
+
+  const handleUploadCanvasImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = String(reader.result || '');
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 900;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.width * scale));
+        c.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = c.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        const compressedUrl = c.toDataURL('image/webp', 0.86);
+        const aspect = img.height / Math.max(1, img.width);
+        const targetW = 68;
+        const targetH = Math.max(16, Math.min(120, Math.round(targetW * aspect)));
+        const targetPage = Math.min(activePageIndex, Math.max(0, pages.length - 1));
+        handleAddCanvasElement({
+          id: `cv_img_${Date.now()}`,
+          pageIndex: targetPage,
+          kind: 'image',
+          xMm: Math.round((paper.w - targetW) / 2),
+          yMm: Math.round(paper.h * 0.42),
+          wMm: targetW,
+          hMm: targetH,
+          dataUrl: compressedUrl,
+        });
+        setToolMode('select');
+      };
+      img.src = src;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleFitToWidth = () => {
+    const vp = canvasViewportRef.current;
+    if (!vp) return;
+    const availW = Math.max(320, vp.clientWidth - 64);
+    const cols = pageLayoutMode === 'spread' && pages.length > 1 ? 2 : 1;
+    const neededW = pageWidthPx * cols + (cols === 2 ? 28 : 0);
+    const computed = Math.max(0.42, Math.min(1.45, Number((availW / neededW).toFixed(2))));
+    setZoom(computed);
+  };
+
+  const effectiveToolMode: CanvasToolMode = isSpaceHeld ? 'pan' : toolMode;
+
+  const handleBoardPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const isMiddle = e.button === 1;
+    if (effectiveToolMode !== 'pan' && !isMiddle) {
+      if (e.target === e.currentTarget) {
+        setSelectedCanvasElId(null);
+      }
+      return;
+    }
+    const vp = canvasViewportRef.current;
+    if (!vp) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origLeft = vp.scrollLeft;
+    const origTop = vp.scrollTop;
+
+    const onMove = (mv: PointerEvent) => {
+      vp.scrollLeft = origLeft - (mv.clientX - startX);
+      vp.scrollTop = origTop - (mv.clientY - startY);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const handleCanvasWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 0.08 : -0.08;
+      setZoom((z) => Math.max(0.4, Math.min(1.8, Number((z + delta).toFixed(2)))));
+    }
+  };
+
   const { pages, layoutAudit } = useMemo(() => {
     const usableHeightMm = paper.h - format.marginTop - format.marginBottom - 14;
     const instrLines = identity.instructions
@@ -678,7 +922,14 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
       <div
         key={`${readOnly ? 'print' : 'edit'}_${pageIndex}`}
         dir={isRtl ? 'rtl' : 'ltr'}
-        className="print-page bg-white text-slate-950 shadow-sm border border-slate-300 relative flex flex-col justify-between"
+        onMouseDown={() => {
+          if (!readOnly) setActivePageIndex(pageIndex);
+        }}
+        className={`print-page bg-white text-slate-950 border border-slate-300/90 relative flex flex-col justify-between ${
+          readOnly
+            ? ''
+            : 'shadow-[0_12px_32px_rgba(15,30,61,0.12)] transition-shadow'
+        }`}
         style={{
           width: `${pageWidthPx}px`,
           minHeight: `${pageHeightPx}px`,
@@ -692,7 +943,39 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
           lineHeight: format.lineSpacing,
         }}
       >
-        <div className="overflow-visible">
+        {/* Optional Canvas Margin Guides */}
+        {!readOnly && showMarginGuides && (
+          <div
+            className="no-print pointer-events-none absolute border border-dashed border-sky-400/70"
+            style={{
+              top: `${format.marginTop * MM_TO_PX}px`,
+              right: `${format.marginRight * MM_TO_PX}px`,
+              bottom: `${format.marginBottom * MM_TO_PX}px`,
+              left: `${format.marginLeft * MM_TO_PX}px`,
+            }}
+          />
+        )}
+
+        {/* Freeform Canvas Elements & Drawing Overlay Layer */}
+        <CanvasLayerOverlay
+          pageIndex={pageIndex}
+          pageWidthMm={paper.w}
+          pageHeightMm={paper.h}
+          mmToPx={MM_TO_PX}
+          zoom={zoom}
+          elements={canvasElements}
+          toolMode={effectiveToolMode}
+          drawColor={drawColor}
+          drawWidthMm={drawWidthMm}
+          selectedId={selectedCanvasElId}
+          readOnly={readOnly}
+          onSelectElement={setSelectedCanvasElId}
+          onChangeElement={handleUpdateCanvasElement}
+          onAddElement={handleAddCanvasElement}
+          onDeleteElement={handleDeleteCanvasElement}
+        />
+
+        <div className="overflow-visible relative z-10">
           {/* Header Mode 1: KMI Arabic (RTL) */}
           {pageIndex === 0 && isKmiArabicPreset && (
             <div className="mb-3">
@@ -1477,19 +1760,54 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
                     )}
 
                     <div
+                      draggable={canEdit && effectiveToolMode === 'select'}
+                      onDragStart={(e) => {
+                        setDragFromIdx(globalIndex);
+                        e.dataTransfer.effectAllowed = 'move';
+                      }}
+                      onDragOver={(e) => {
+                        if (dragFromIdx === null || dragFromIdx === globalIndex) return;
+                        e.preventDefault();
+                        setDragOverIdx(globalIndex);
+                      }}
+                      onDragLeave={() => {
+                        if (dragOverIdx === globalIndex) setDragOverIdx(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragFromIdx !== null && dragFromIdx !== globalIndex) {
+                          handleReorderQuestion(dragFromIdx, globalIndex);
+                        }
+                        setDragFromIdx(null);
+                        setDragOverIdx(null);
+                      }}
+                      onDragEnd={() => {
+                        setDragFromIdx(null);
+                        setDragOverIdx(null);
+                      }}
                       style={{
                         marginBottom: `${format.questionSpacing}px`,
                         textAlign: effectiveQAlign,
                       }}
-                      className={`group/q relative break-inside-avoid ${
-                        canEdit && activeQuestionId === q.id ? 'bg-sky-50/30 rounded' : ''
+                      className={`group/q relative break-inside-avoid transition-colors ${
+                        dragOverIdx === globalIndex
+                          ? 'ring-2 ring-sky-500 bg-sky-50/50 rounded'
+                          : canEdit && activeQuestionId === q.id
+                          ? 'bg-sky-50/30 rounded'
+                          : ''
                       }`}
                     >
                       {canEdit && (
                         <div
                           dir="ltr"
-                          className="no-print opacity-0 group-hover/q:opacity-100 focus-within:opacity-100 transition-opacity absolute -top-5 right-0 z-10 flex items-center gap-0.5 bg-white border border-slate-200 shadow-sm rounded px-1 py-0.5 text-[10px] font-sans"
+                          className="no-print opacity-0 group-hover/q:opacity-100 focus-within:opacity-100 transition-opacity absolute -top-5 right-0 z-30 flex items-center gap-0.5 bg-white border border-slate-200 shadow-sm rounded px-1 py-0.5 text-[10px] font-sans"
                         >
+                          <span
+                            className="p-0.5 text-slate-400 hover:text-slate-700 cursor-grab active:cursor-grabbing"
+                            title="Seret untuk memindah urutan soal di kanvas"
+                          >
+                            <GripVertical className="w-3 h-3" />
+                          </span>
                           <button
                             type="button"
                             onMouseDown={(e) => e.preventDefault()}
@@ -2162,6 +2480,22 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
               </button>
             </div>
 
+            {onToggleFullscreenCanvas && (
+              <button
+                type="button"
+                onClick={onToggleFullscreenCanvas}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded"
+                title={isFullscreenCanvas ? 'Keluar dari Mode Fokus Kanvas' : 'Perluas Kanvas Layar Penuh'}
+              >
+                {isFullscreenCanvas ? (
+                  <Minimize2 className="w-3 h-3" />
+                ) : (
+                  <Maximize2 className="w-3 h-3" />
+                )}
+                <span className="hidden sm:inline">{isFullscreenCanvas ? 'Perkecil' : 'Fokus'}</span>
+              </button>
+            )}
+
             {onPrint && (
               <button
                 type="button"
@@ -2198,27 +2532,279 @@ export const LiveDocumentPreview: React.FC<LiveDocumentPreviewProps> = ({
         </div>
       </div>
 
-      {/* Scrollable Multi-Page Direct Editor Canvas */}
-      <div className="no-print flex-1 overflow-auto p-6 flex flex-col items-center gap-6">
-        {pages.map((page, idx) => (
-          <div
-            key={idx}
-            style={{
-              width: `${pageWidthPx * zoom}px`,
-              height: `${pageHeightPx * zoom}px`,
-            }}
-            className="shrink-0 relative"
+      {/* Main Interactive Canvas Studio Body (Left Tool Dock + Dot-Grid Drafting Board) */}
+      <div className="no-print relative flex-1 min-h-0 flex overflow-hidden">
+        {/* Vertical Canvas Tool Dock */}
+        <div className="w-12 shrink-0 bg-white border-r border-slate-200 py-2.5 flex flex-col items-center gap-1.5 z-20 select-none overflow-y-auto">
+          <button
+            type="button"
+            onClick={() => setToolMode('select')}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+              effectiveToolMode === 'select'
+                ? 'bg-[#0F1E3D] text-white'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+            title="Pilih, Edit Teks & Geser Elemen"
           >
-            <div
-              style={{
-                transform: `scale(${zoom})`,
-                transformOrigin: 'top left',
+            <MousePointer2 className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setToolMode('pan')}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+              effectiveToolMode === 'pan'
+                ? 'bg-[#0F1E3D] text-white'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+            title="Geser Kanvas (atau tahan tombol Spasi + Seret)"
+          >
+            <Hand className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setToolMode(toolMode === 'draw' ? 'select' : 'draw')}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+              effectiveToolMode === 'draw'
+                ? 'bg-sky-600 text-white'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+            title="Pena Gambar / Coretan Bebas di Kertas"
+          >
+            <PenTool className="w-4 h-4" />
+          </button>
+
+          <div className="w-6 h-px bg-slate-200 my-0.5" />
+
+          <button
+            type="button"
+            onClick={() => addQuickCanvasObject('text')}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-700 hover:bg-sky-50 hover:text-sky-700 transition-colors"
+            title="Tambah Kotak Teks Mengambang di Kanvas"
+          >
+            <Type className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => canvasImageInputRef.current?.click()}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-700 hover:bg-sky-50 hover:text-sky-700 transition-colors"
+            title="Sisipkan Gambar / Diagram Soal ke Kanvas"
+          >
+            <ImagePlus className="w-4 h-4" />
+          </button>
+          <input
+            ref={canvasImageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/svg+xml"
+            onChange={handleUploadCanvasImage}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => addQuickCanvasObject('box')}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-700 hover:bg-sky-50 hover:text-sky-700 transition-colors"
+            title="Tambah Kotak Jawaban / Bingkai di Kanvas"
+          >
+            <Square className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => addQuickCanvasObject('line')}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-700 hover:bg-sky-50 hover:text-sky-700 transition-colors"
+            title="Tambah Garis Pemisah di Kanvas"
+          >
+            <Minus className="w-4 h-4" />
+          </button>
+
+          <div className="w-6 h-px bg-slate-200 my-0.5" />
+
+          <button
+            type="button"
+            onClick={() => setShowMarginGuides((v) => !v)}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+              showMarginGuides
+                ? 'bg-sky-100 text-sky-800 border border-sky-300'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+            title="Tampilkan / Sembunyikan Garis Bantu Margin"
+          >
+            <Grid className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setPageLayoutMode((m) => (m === 'single' ? 'spread' : 'single'))}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+              pageLayoutMode === 'spread'
+                ? 'bg-sky-100 text-sky-800 border border-sky-300'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+            title={pageLayoutMode === 'spread' ? 'Tampilan 1 Kolom' : 'Tampilan 2 Halaman Berdampingan'}
+          >
+            <Columns2 className="w-4 h-4" />
+          </button>
+
+          {canvasElements.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                updateCanvasElements(canvasElements.filter((el) => el.pageIndex !== activePageIndex));
+                setSelectedCanvasElId(null);
               }}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-rose-600 hover:bg-rose-50 transition-colors mt-auto"
+              title="Bersihkan Semua Elemen Kanvas di Halaman Aktif"
             >
-              {renderPageContent(idx, page.items, pages.length, false)}
+              <Eraser className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Dot-Grid Drafting Board Viewport */}
+        <div
+          ref={canvasViewportRef}
+          onPointerDown={handleBoardPointerDown}
+          onWheel={handleCanvasWheel}
+          className={`flex-1 overflow-auto relative p-8 pb-16 ${
+            effectiveToolMode === 'pan'
+              ? 'cursor-grab active:cursor-grabbing select-none'
+              : effectiveToolMode === 'draw'
+              ? 'cursor-crosshair'
+              : ''
+          }`}
+          style={{
+            backgroundColor: '#E9EEF5',
+            backgroundImage: 'radial-gradient(#CBD5E1 1.15px, transparent 1.15px)',
+            backgroundSize: '20px 20px',
+          }}
+        >
+          {/* Floating Pen Controls when Pen Tool Active */}
+          {effectiveToolMode === 'draw' && (
+            <div className="sticky top-2 left-1/2 -translate-x-1/2 z-30 w-fit mx-auto mb-4 bg-white/95 backdrop-blur border border-slate-200 shadow-md rounded-lg px-3 py-1.5 flex items-center gap-2 text-xs">
+              <span className="font-semibold text-slate-700">Pena Kanvas:</span>
+              {['#0F1E3D', '#0F172A', '#DC2626', '#1D4ED8', '#15803D'].map((col) => (
+                <button
+                  key={col}
+                  type="button"
+                  onClick={() => setDrawColor(col)}
+                  className={`w-4 h-4 rounded-full border ${
+                    drawColor === col ? 'ring-2 ring-sky-500 ring-offset-1 border-white' : 'border-slate-300'
+                  }`}
+                  style={{ backgroundColor: col }}
+                />
+              ))}
+              <select
+                value={drawWidthMm}
+                onChange={(e) => setDrawWidthMm(Number(e.target.value))}
+                className="px-1.5 py-0.5 text-[11px] border border-slate-200 rounded bg-slate-50"
+              >
+                <option value={0.35}>Tipis</option>
+                <option value={0.55}>Sedang</option>
+                <option value={1.0}>Tebal</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => setToolMode('select')}
+                className="px-2 py-0.5 bg-[#0F1E3D] text-white rounded text-[11px] font-medium"
+              >
+                Selesai
+              </button>
+            </div>
+          )}
+
+          <div
+            className={`mx-auto flex ${
+              pageLayoutMode === 'spread' && pages.length > 1
+                ? 'flex-wrap justify-center items-start gap-7'
+                : 'flex-col items-center gap-7'
+            }`}
+          >
+            {pages.map((page, idx) => (
+              <div
+                key={idx}
+                ref={(el) => {
+                  pageRefs.current[idx] = el;
+                }}
+                className="shrink-0 flex flex-col items-start gap-1.5"
+              >
+                <div className="flex items-center justify-between w-full px-0.5 text-[11px] font-sans text-slate-500 select-none">
+                  <span className={activePageIndex === idx ? 'font-semibold text-[#0F1E3D]' : ''}>
+                    Halaman {idx + 1} · {format.paperSize} ({paper.w}×{paper.h} mm)
+                  </span>
+                  <span className="font-mono tabular-nums text-[10px]">
+                    {page.items.length} soal
+                  </span>
+                </div>
+                <div
+                  style={{
+                    width: `${pageWidthPx * zoom}px`,
+                    height: `${pageHeightPx * zoom}px`,
+                  }}
+                  className="relative"
+                >
+                  <div
+                    style={{
+                      transform: `scale(${zoom})`,
+                      transformOrigin: 'top left',
+                    }}
+                  >
+                    {renderPageContent(idx, page.items, pages.length, false)}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Floating Canvas Bottom Navigator & Quick Zoom Bar */}
+          <div className="sticky bottom-3 left-0 right-0 z-30 flex justify-center pointer-events-none mt-4">
+            <div className="pointer-events-auto bg-white/95 backdrop-blur border border-slate-200 shadow-lg rounded-xl px-3 py-1.5 flex items-center gap-2 text-xs">
+              <div className="flex items-center gap-1">
+                {pages.map((_, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => {
+                      setActivePageIndex(idx);
+                      pageRefs.current[idx]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }}
+                    className={`px-2 py-0.5 rounded text-[11px] font-mono tabular-nums transition-colors ${
+                      activePageIndex === idx
+                        ? 'bg-[#0F1E3D] text-white font-semibold'
+                        : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Hal {idx + 1}
+                  </button>
+                ))}
+              </div>
+              <div className="w-px h-4 bg-slate-200" />
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.max(0.4, Number((z - 0.1).toFixed(2))))}
+                className="p-1 rounded hover:bg-slate-100 text-slate-700"
+                title="Perkecil"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <span className="font-mono tabular-nums text-[11px] text-slate-700 w-10 text-center">
+                {Math.round(zoom * 100)}%
+              </span>
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.min(1.8, Number((z + 0.1).toFixed(2))))}
+                className="p-1 rounded hover:bg-slate-100 text-slate-700"
+                title="Perbesar"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleFitToWidth}
+                className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px] font-medium text-slate-700"
+                title="Sesuaikan Lebar Kanvas"
+              >
+                Pas Layar
+              </button>
             </div>
           </div>
-        ))}
+        </div>
       </div>
 
       {/* Hidden Print-Only Full-Scale Container */}

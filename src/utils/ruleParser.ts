@@ -588,7 +588,8 @@ export async function parseQuestionsSmart(
   }
 
   try {
-    const response = await fetch('/api/ai/parse-questions', {
+    const basePrefix = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '');
+    const response = await fetch(`${basePrefix}/api/ai/parse-questions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rawText }),

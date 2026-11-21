@@ -14,7 +14,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // Health check endpoint
-app.get('/api/health', (_req, res) => {
+app.get(['/api/health', '/ujiaan/api/health'], (_req, res) => {
   res.json({
     ok: true,
     hasGeminiKey: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'),
@@ -22,7 +22,7 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Server-side Gemini Smart Question Parser endpoint
-app.post('/api/ai/parse-questions', async (req, res) => {
+app.post(['/api/ai/parse-questions', '/ujiaan/api/ai/parse-questions'], async (req, res) => {
   const { rawText } = req.body as { rawText?: string };
 
   if (!rawText || typeof rawText !== 'string' || !rawText.trim()) {
@@ -244,6 +244,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
+    app.use('/ujiaan', express.static(distDir));
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));

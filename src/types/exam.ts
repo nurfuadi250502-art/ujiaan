@@ -89,6 +89,36 @@ export interface ExamIdentity {
   includeStudentFields: boolean;
 }
 
+export type CanvasToolMode = 'select' | 'pan' | 'draw';
+
+export interface CanvasPoint {
+  xMm: number;
+  yMm: number;
+}
+
+export interface CanvasElement {
+  id: string;
+  pageIndex: number;
+  kind: 'text' | 'image' | 'box' | 'line' | 'drawing';
+  xMm: number;
+  yMm: number;
+  wMm: number;
+  hMm: number;
+  text?: string;
+  fontSizePt?: number;
+  color?: string;
+  bgColor?: string;
+  borderColor?: string;
+  bold?: boolean;
+  align?: 'left' | 'center' | 'right';
+  dataUrl?: string;
+  strokeColor?: string;
+  fillColor?: string;
+  strokeWidthMm?: number;
+  dashed?: boolean;
+  points?: CanvasPoint[];
+}
+
 export interface FormatConfig {
   paperSize: PaperSize;
   direction: TextDirection;
@@ -118,6 +148,7 @@ export interface FormatConfig {
   stemItalic: boolean;
   alignment: 'left' | 'center' | 'right' | 'justify';
   optionColumns: 1 | 2;
+  canvasElements?: CanvasElement[];
 }
 
 export type PlaceholderKey =

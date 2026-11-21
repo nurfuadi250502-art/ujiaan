@@ -1753,6 +1753,101 @@ async function exportUnifiedCanvasPdf(params: {
     }
   });
 
+  // Overlay freeform CanvasElements (text boxes, images, boxes, lines, freehand drawings)
+  const canvasEls = format.canvasElements || [];
+  if (canvasEls.length > 0) {
+    for (const el of canvasEls) {
+      const targetPage = pages[el.pageIndex];
+      if (!targetPage) continue;
+      const pCtx = targetPage.getContext('2d');
+      if (!pCtx) continue;
+      const xPx = el.xMm * MM_TO_PX;
+      const yPx = el.yMm * MM_TO_PX;
+      const wPx = el.wMm * MM_TO_PX;
+      const hPx = el.hMm * MM_TO_PX;
+
+      if (el.kind === 'drawing' && el.points && el.points.length > 0) {
+        pCtx.save();
+        pCtx.strokeStyle = el.strokeColor || '#0F172A';
+        pCtx.lineWidth = (el.strokeWidthMm || 0.5) * MM_TO_PX;
+        pCtx.lineCap = 'round';
+        pCtx.lineJoin = 'round';
+        pCtx.beginPath();
+        el.points.forEach((pt, idx) => {
+          const px = pt.xMm * MM_TO_PX;
+          const py = pt.yMm * MM_TO_PX;
+          if (idx === 0) pCtx.moveTo(px, py);
+          else pCtx.lineTo(px, py);
+        });
+        if (el.points.length === 1) {
+          pCtx.lineTo(el.points[0].xMm * MM_TO_PX + 0.5, el.points[0].yMm * MM_TO_PX + 0.5);
+        }
+        pCtx.stroke();
+        pCtx.restore();
+      } else if (el.kind === 'box') {
+        pCtx.save();
+        if (el.fillColor && el.fillColor !== 'transparent') {
+          pCtx.fillStyle = el.fillColor;
+          pCtx.fillRect(xPx, yPx, wPx, hPx);
+        }
+        pCtx.strokeStyle = el.strokeColor || '#0F172A';
+        pCtx.lineWidth = Math.max(1, (el.strokeWidthMm || 0.4) * MM_TO_PX);
+        if (el.dashed) pCtx.setLineDash([4 * MM_TO_PX * 0.5, 3 * MM_TO_PX * 0.5]);
+        pCtx.strokeRect(xPx, yPx, wPx, hPx);
+        pCtx.restore();
+      } else if (el.kind === 'line') {
+        pCtx.save();
+        pCtx.strokeStyle = el.strokeColor || '#0F172A';
+        pCtx.lineWidth = Math.max(1, (el.strokeWidthMm || 0.5) * MM_TO_PX);
+        if (el.dashed) pCtx.setLineDash([4 * MM_TO_PX * 0.5, 3 * MM_TO_PX * 0.5]);
+        pCtx.beginPath();
+        pCtx.moveTo(xPx, yPx + 4);
+        pCtx.lineTo(xPx + wPx, yPx + 4);
+        pCtx.stroke();
+        pCtx.restore();
+      } else if (el.kind === 'text') {
+        pCtx.save();
+        if (el.bgColor && el.bgColor !== 'transparent') {
+          pCtx.fillStyle = el.bgColor;
+          pCtx.fillRect(xPx, yPx, wPx, hPx);
+        }
+        if (el.borderColor) {
+          pCtx.strokeStyle = el.borderColor;
+          pCtx.lineWidth = Math.max(1, 0.35 * MM_TO_PX);
+          pCtx.strokeRect(xPx, yPx, wPx, hPx);
+        }
+        const fSize = Math.round((el.fontSizePt || 11) * PT_TO_PX);
+        pCtx.font = `${el.bold ? '700' : '400'} ${fSize}px ${fontStack}`;
+        pCtx.fillStyle = el.color || '#0F172A';
+        pCtx.textBaseline = 'top';
+        pCtx.textAlign = el.align || 'left';
+        const lines = (el.text || '').split('\n');
+        const tx = el.align === 'center' ? xPx + wPx / 2 : el.align === 'right' ? xPx + wPx - 6 : xPx + 6;
+        lines.forEach((ln, lIdx) => {
+          pCtx.fillText(ln, tx, yPx + 4 + lIdx * fSize * 1.3, Math.max(10, wPx - 12));
+        });
+        pCtx.restore();
+      } else if (el.kind === 'image' && el.dataUrl) {
+        const imgObj = await new Promise<HTMLImageElement | null>((resolve) => {
+          const im = new Image();
+          im.onload = () => resolve(im);
+          im.onerror = () => resolve(null);
+          im.src = el.dataUrl!;
+        });
+        if (imgObj) {
+          pCtx.save();
+          const ratio = Math.min(wPx / imgObj.width, hPx / imgObj.height);
+          const drawW = imgObj.width * ratio;
+          const drawH = imgObj.height * ratio;
+          const ox = xPx + (wPx - drawW) / 2;
+          const oy = yPx + (hPx - drawH) / 2;
+          pCtx.drawImage(imgObj, ox, oy, drawW, drawH);
+          pCtx.restore();
+        }
+      }
+    }
+  }
+
   // Assemble into crisp multi-page PDF
   const pdf = new jsPDF({
     orientation: 'portrait',

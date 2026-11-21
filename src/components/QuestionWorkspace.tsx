@@ -17,6 +17,8 @@ import {
   ShieldCheck,
   Eye,
   ListChecks,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 import type {
   ExamIdentity,
@@ -124,6 +126,8 @@ export const QuestionWorkspace: React.FC<QuestionWorkspaceProps> = ({
 }) => {
   const [leftTab, setLeftTab] = useState<'input' | 'identity' | 'format'>('input');
   const [rightTab, setRightTab] = useState<'preview' | 'structure' | 'validation'>('preview');
+  const [isLeftDrawerCollapsed, setIsLeftDrawerCollapsed] = useState<boolean>(false);
+  const [isCanvasFullscreen, setIsCanvasFullscreen] = useState<boolean>(false);
   const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null);
   const [editDraftStem, setEditDraftStem] = useState<string>('');
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -328,10 +332,11 @@ export const QuestionWorkspace: React.FC<QuestionWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* Main Split Workbench */}
-      <div className="print-reset-layout grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
-        {/* LEFT PANE: Editor + Identity + Format */}
-        <div className="no-print xl:col-span-5 bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col">
+      {/* Main Canvas Studio Workbench */}
+      <div className="print-reset-layout flex flex-col xl:flex-row gap-4 items-stretch">
+        {/* LEFT PANE: Collapsible Input + Identity + Format Drawer */}
+        {!isLeftDrawerCollapsed && (
+          <div className="no-print w-full xl:w-[410px] 2xl:w-[440px] shrink-0 bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col">
           {/* Left Pane Segmented Tabs */}
           <div className="p-2 bg-slate-50 border-b border-slate-200 flex items-center gap-1">
             <button
@@ -1056,12 +1061,35 @@ export const QuestionWorkspace: React.FC<QuestionWorkspaceProps> = ({
               </div>
             </div>
           )}
-        </div>
+          </div>
+        )}
 
-        {/* RIGHT PANE: Direct Word-Like Editor & Live Preview + Detected Structure + Accuracy Comparison */}
-        <div className="print-reset-layout xl:col-span-7 flex flex-col space-y-3">
-          {/* Right Pane Tabs */}
-          <div className="no-print bg-white border border-slate-200 rounded-xl p-1.5 flex items-center gap-1">
+        {/* RIGHT PANE: Full Interactive Document Canvas + Detected Structure + Accuracy Comparison */}
+        <div
+          className={`print-reset-layout flex-1 min-w-0 flex flex-col space-y-2.5 ${
+            isCanvasFullscreen ? 'fixed inset-0 z-50 bg-slate-100 p-3 space-y-2' : ''
+          }`}
+        >
+          {/* Right Pane Tabs & Drawer Toggle */}
+          <div className="no-print bg-white border border-slate-200 rounded-xl p-1.5 flex items-center gap-1.5">
+            {!isCanvasFullscreen && (
+              <button
+                type="button"
+                onClick={() => setIsLeftDrawerCollapsed((v) => !v)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors whitespace-nowrap shrink-0"
+                title={isLeftDrawerCollapsed ? 'Tampilkan Panel Input Soal' : 'Sembunyikan Panel Input agar Kanvas Lebih Luas'}
+              >
+                {isLeftDrawerCollapsed ? (
+                  <PanelLeftOpen className="w-3.5 h-3.5 text-sky-700" />
+                ) : (
+                  <PanelLeftClose className="w-3.5 h-3.5 text-slate-600" />
+                )}
+                <span className="hidden sm:inline">
+                  {isLeftDrawerCollapsed ? 'Buka Input' : 'Luaskan Kanvas'}
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setRightTab('preview')}
@@ -1072,7 +1100,7 @@ export const QuestionWorkspace: React.FC<QuestionWorkspaceProps> = ({
               }`}
             >
               <Eye className="w-3.5 h-3.5" />
-              Editor Dokumen (Word Style)
+              Kanvas Dokumen
             </button>
             <button
               type="button"
@@ -1096,12 +1124,18 @@ export const QuestionWorkspace: React.FC<QuestionWorkspaceProps> = ({
               }`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              Validasi & Perbandingan ({accuracyReport.preservationScore}%)
+              Validasi ({accuracyReport.preservationScore}%)
             </button>
           </div>
 
-          {/* Right Pane Viewport */}
-          <div className="print-reset-layout h-[820px]">
+          {/* Right Pane Canvas Viewport */}
+          <div
+            className={`print-reset-layout ${
+              isCanvasFullscreen
+                ? 'flex-1 min-h-0'
+                : 'h-[calc(100vh-205px)] min-h-[720px]'
+            }`}
+          >
             {rightTab === 'preview' && (
               <LiveDocumentPreview
                 template={activeTemplate}
@@ -1120,6 +1154,8 @@ export const QuestionWorkspace: React.FC<QuestionWorkspaceProps> = ({
                 onExportDocx={onExportDocx}
                 onExportPdf={onExportPdf}
                 isExportingDocx={isExportingDocx}
+                isFullscreenCanvas={isCanvasFullscreen}
+                onToggleFullscreenCanvas={() => setIsCanvasFullscreen((v) => !v)}
               />
             )}
 
